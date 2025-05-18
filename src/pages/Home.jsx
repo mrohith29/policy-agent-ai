@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import Chat from './Chat';
 
 const sampleQuestions = [
   "What does this clause mean?",
@@ -13,7 +14,17 @@ const Home = () => {
 
   const handleSend = () => {
     if (question.trim()) {
-      navigate('/chat', { state: { question } });
+      navigate('/chat', 
+        { state: 
+          { question } 
+        }
+      );
+    }
+  };
+
+  const handleKeyPress = (e) => {
+    if (e.key === 'Enter') {
+      handleSend();
     }
   };
 
@@ -27,6 +38,7 @@ const Home = () => {
             type="text"
             value={question}
             onChange={(e) => setQuestion(e.target.value)}
+            onKeyDown={handleKeyPress}
             placeholder="Type your question here..."
             className="w-full px-6 py-4 rounded-full shadow-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-indigo-400"
           />
@@ -44,7 +56,7 @@ const Home = () => {
 
       {/* Product Abstract Section */}
       <section className="py-16 px-6 md:px-20">
-        <h2 className="text-3xl font-bold mb-6 text-indigo-700">Why PolicyAgent?</h2>
+        <h2 className="text-3xl font-bold mb-6 text-indigo-700">Let's Keep it simple, Why PolicyAgent?</h2>
         <ul className="space-y-4 text-lg">
           <li>✅ Understand complex terms in plain English</li>
           <li>✅ Get instant answers from your policy documents</li>

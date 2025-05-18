@@ -6,6 +6,7 @@ import Documentation from "./pages/documentation";
 import Pricing from "./pages/Pricing";
 import NavBar from "./components/NavBar";
 import ProfileSidebar from "./components/ProfileSidebar";
+import Chat from './pages/Chat';
 
 function App() {
   return (
@@ -16,6 +17,7 @@ function App() {
           <NavBar/>
           <Routes>
             <Route path="/" element={<Home/>}/>
+            <Route path="/chat" element={<Chat/>}/>
             <Route path="/account" element={<Account/>}/>
             <Route path="/settings" element={<Settings/>}/>
             <Route path="/documentation" element={<Documentation/>}/>

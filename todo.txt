@@ -1,0 +1,10 @@
+***** Link frontend to backend
+***** Link database 
+***** Link sessions and logins and authentication
+Persistent conversation history (e.g., per user)
+
+Multiple conversations support
+
+Authentication for users
+
+Optimizations for longer contexts (like summarizing older messages)
