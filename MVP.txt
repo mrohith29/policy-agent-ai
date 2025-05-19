@@ -1,0 +1,11 @@
+- Upload policy/legal documents (e.g., PDFs, text).
+- Query input interface (e.g., text box for questions).
+- Backend processing using Gemini API to generate domain-specific answers.
+
+Advanced
+- Advanced analytics (e.g., query trends).
+- Multi-user collaboration (e.g., team accounts).
+- Complex integrations (e.g., CRM systems).
+- Highly customized UI or branding.
+
+grok chat -> https://grok.com/share/bGVnYWN5_89833eb9-442f-4562-9b98-b303157c998d

@@ -1,3 +1,6 @@
+uvicorn src.app:app --reload
+
+
 ***** Link frontend to backend
 ***** Link database 
 ***** Link sessions and logins and authentication
