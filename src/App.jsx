@@ -7,6 +7,8 @@ import Pricing from "./pages/Pricing";
 import NavBar from "./components/NavBar";
 import ProfileSidebar from "./components/ProfileSidebar";
 import Chat from './pages/Chat';
+import Login from './components/Login';
+import Signup from './components/Signup';
 
 function App() {
   return (
@@ -22,6 +24,8 @@ function App() {
             <Route path="/settings" element={<Settings/>}/>
             <Route path="/documentation" element={<Documentation/>}/>
             <Route path="/pricing" element={<Pricing/>}/>
+            <Route path="/login" element={<Login />} />
+            <Route path="/signup" element={<Signup />} />
           </Routes>
         </div>
       </div>

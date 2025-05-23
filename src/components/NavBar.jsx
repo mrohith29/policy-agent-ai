@@ -1,32 +1,69 @@
-import { useState } from "react";
-import { FaUserCircle } from "react-icons/fa";
-import ProfileSidebar from "./ProfileSidebar";
-import { Link } from "react-router-dom";
+import React, { useState, useEffect } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import { supabase } from '../utils/supabase';
 
-const Navbar = () => {
-  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+const NavBar = () => {
+  const [user, setUser] = useState(null);
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    // Check initial session
+    const getSession = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      setUser(session?.user ?? null);
+    };
+    getSession();
+
+    // Listen for auth state changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    navigate('/');
+  };
 
   return (
-    <nav className="flex justify-between items-center p-4 shadow-md bg-white">
-      {/* Left: Product Name */}
-      <div className="text-xl font-bold text-blue-600"><Link to="/">PolicyAgent</Link></div>
-
-      {/* Right: Navigation */}
-      <div className="flex items-center gap-6">
-        <Link to="/pricing" className="text-gray-700 hover:text-blue-600">Pricing</Link>
-        <Link to="/chat" className="text-gray-700 hover:text-blue-600">Chat</Link>
-        <Link to="/documentation" className="text-gray-700 hover:text-blue-600">Documentation</Link>
-        
-        {/* Profile Icon */}
-        <button onClick={() => setIsSidebarOpen(true)} className="text-2xl text-gray-700 hover:text-blue-600">
-          <FaUserCircle />
-        </button>
+    <nav className="bg-gray-900 text-white p-4">
+      <div className="container mx-auto flex justify-between items-center">
+        <Link to="/" className="text-xl font-bold">Policy Agent AI</Link>
+        <div className="space-x-4">
+          <Link to="/" className="hover:text-indigo-400">Home</Link>
+          <Link to="/chat" className="hover:text-indigo-400">Chat</Link>
+          <Link to="/document-upload" className="hover:text-indigo-400">Upload</Link>
+          {user && (
+            <>
+              <Link to="/account" className="hover:text-indigo-400">Account</Link>
+              <Link to="/settings" className="hover:text-indigo-400">Settings</Link>
+            </>
+          )}
+          <Link to="/documentation" className="hover:text-indigo-400">Docs</Link>
+          <Link to="/pricing" className="hover:text-indigo-400">Pricing</Link>
+          {user ? (
+            <button
+              onClick={handleLogout}
+              className="bg-indigo-600 px-4 py-2 rounded-lg hover:bg-indigo-700 transition-colors"
+            >
+              Logout
+            </button>
+          ) : (
+            <>
+              <Link to="/login" className="bg-indigo-600 px-4 py-2 rounded-lg hover:bg-indigo-700 transition-colors">
+                Login
+              </Link>
+              <Link to="/signup" className="bg-indigo-600 px-4 py-2 rounded-lg hover:bg-indigo-700 transition-colors">
+                Sign Up
+              </Link>
+            </>
+          )}
+        </div>
       </div>
-
-      {/* Slide-out Sidebar */}
-      <ProfileSidebar isOpen={isSidebarOpen} onClose={() => setIsSidebarOpen(false)} />
     </nav>
   );
 };
 
-export default Navbar;
+export default NavBar;
