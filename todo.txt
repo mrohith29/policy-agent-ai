@@ -1,7 +1,7 @@
 uvicorn src.app:app --reload
 
 
-***** Link frontend to backend
+***** Add document parser
 ***** Link database 
 ***** Link sessions and logins and authentication
 Persistent conversation history (e.g., per user)

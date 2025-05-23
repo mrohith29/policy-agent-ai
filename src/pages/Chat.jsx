@@ -4,6 +4,8 @@ import { useNavigation } from 'react-router-dom';
 import { useEffect } from 'react';
 import { useRef } from 'react';
 import { useParams, useLocation } from 'react-router-dom';
+import DocumentUpload from './DocumentUpload'; // import at the top
+
 
 const Chat = () => {
     const location = useLocation();
@@ -17,6 +19,7 @@ const Chat = () => {
     const [activeConversation, setActiveConversation] = useState(1);
     const messagesEndRef = useRef(null);
     const questionAddedRef = useRef(false);
+    const [docText, setDocText] = useState("");
 
     useEffect(() => {
         if (question && !questionAddedRef.current) {
@@ -24,6 +27,13 @@ const Chat = () => {
             questionAddedRef.current = true;
         }
     }, [question]);
+
+    // Inject docText into conversation on upload
+    useEffect(() => {
+        if (docText) {
+            setMessages(prev => [...prev, { type: 'user', content: "Uploaded Document Content:\n" + docText }]);
+        }
+    }, [docText]);
 
     const handleSendMessage = async () => {
         if (newMessage.trim()) {
@@ -85,7 +95,7 @@ const Chat = () => {
             </div>
 
             {/* Main Chat Area */}
-            <div className="flex flex-col flex-1 h-full">
+            <div className="flex flex-col flex-1 h-full">              
                 {/* Messages Container */}
                 <div className="flex-1 overflow-y-auto p-4 space-y-4">
                     {messages.map((message, index) => (
@@ -109,6 +119,10 @@ const Chat = () => {
 
                 {/* Input Field (centered, max-w-xl) */}
                 <div className="border-t border-gray-200 p-6 bg-white flex justify-center">
+                    {/* Upload Bar */}
+                    <div className="p-4 bg-white border-b border-gray-300">
+                        <DocumentUpload onDocumentParsed={setDocText} />
+                    </div>
                     <div className="flex items-center space-x-4 w-full max-w-xl">
                         <textarea
                             value={newMessage}

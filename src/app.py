@@ -5,6 +5,11 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 from typing import List
 import os
+from fastapi import UploadFile, File
+from fastapi.responses import JSONResponse
+import shutil
+from .parsers import parse_file
+
 
 load_dotenv()
 
@@ -36,31 +41,12 @@ model = genai.GenerativeModel("gemini-1.5-flash")
 
 # Refined system prompt for the policy agent
 SYSTEM_PROMPT = """
-You are a Policy Agent AI specialized in answering queries related to legal documents, such as terms and conditions, policies, agreements, or contracts. You can also engage in general conversational queries related to the legal domain. Follow these guidelines:
+You're a helpful assistant specialized in understanding and explaining documents such as policies, terms, agreements, contracts, and more. Your goal is to provide accurate, clear, and polite responses based on the content provided or general legal understanding.
 
-1. **Scope**:
-   - Answer questions about legal documents, policies, terms, conditions, or agreements based on provided document content or general legal knowledge.
-   - Respond to general conversational queries (e.g., "What is a policy?") within the legal domain using clear, accurate explanations.
-   - If a query requires specific document content and none is provided, respond with: "Please provide the document content to answer this question accurately."
+- If document content is provided, use it to answer questions.
+- If content is not provided and the question needs it, you may gently say: "To answer this accurately, could you upload or share the relevant document?"
 
-2. **Restrictions**:
-   - Do not answer questions involving violence, illegal activities, or topics unrelated to the legal domain. For such queries, respond with: "This query is outside my scope. Please ask a question related to legal documents or policies."
-   - Avoid speculation or providing information outside the provided document or legal knowledge.
-
-3. **Response Guidelines for Domain-Specific Queries**:
-   - Provide balanced responses, including positive and negative aspects (e.g., benefits and risks of a policy) when applicable.
-   - Structure responses with:
-     - A direct answer to the query.
-     - Positive aspects (if applicable).
-     - Negative aspects or risks (if applicable).
-     - Additional considerations or clarifications (if relevant).
-
-4. **Tone and Clarity**:
-   - Maintain a professional, neutral, and objective tone.
-   - Use clear, concise language, explaining legal terms simply when needed.
-
-5. **Error Handling**:
-   - If a query is ambiguous, ask for clarification or explain why it cannot be answered based on available information.
+Please maintain a humble and friendly tone. If a question is out of scope or unclear, kindly ask for clarification or explain politely why it's difficult to answer.
 """
 
 @app.post("/ask")
@@ -90,4 +76,18 @@ async def ask_question(query: Query):
     
     except Exception as e:
         print("Error in /ask:", str(e))
-        return {"error": f"Backend error: {str(e)}"}, 500
+        return JSONResponse(status_code=500, content={"error": f"Backend error: {str(e)}"})
+
+    
+@app.post("/upload")
+async def upload_file(file: UploadFile = File(...)):
+    file_ext = os.path.splitext(file.filename)[1].lower()
+    temp_path = f"temp_uploaded{file_ext}"
+
+    with open(temp_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    text = parse_file(temp_path, file_ext)
+
+    os.remove(temp_path)
+    return JSONResponse(content={"text": text})
