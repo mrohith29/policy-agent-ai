@@ -1,45 +1,42 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
+from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-import google.generativeai as genai
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from dotenv import load_dotenv
 from typing import List
-import os
-from fastapi import UploadFile, File
-from fastapi.responses import JSONResponse
 import shutil
+import os
+import google.generativeai as genai
+from supabase import create_client
 from .parsers import parse_file
-
 
 load_dotenv()
 
 app = FastAPI()
 
-origins = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000"
-]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-class Query(BaseModel):
+class MessageIn(BaseModel):
+    user_id: str
+    conversation_id: str
     messages: List[dict]
 
 GOOGLE_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GOOGLE_API_KEY:
-    raise ValueError("GOOGLE_API_KEY not found in environment variables")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+if not all([GOOGLE_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY]):
+    raise EnvironmentError("One or more required environment variables are missing.")
 
 genai.configure(api_key=GOOGLE_API_KEY)
-
 model = genai.GenerativeModel("gemini-1.5-flash")
 
-# Refined system prompt for the policy agent
 SYSTEM_PROMPT = """
 You're a helpful assistant specialized in understanding and explaining documents such as policies, terms, agreements, contracts, and more. Your goal is to provide accurate, clear, and polite responses based on the content provided or general legal understanding.
 
@@ -50,35 +47,39 @@ Please maintain a humble and friendly tone. If a question is out of scope or unc
 """
 
 @app.post("/ask")
-async def ask_question(query: Query):
+async def ask_question(query: MessageIn):
     try:
-        print("Received messages:", query.messages)
+        user_message = query.messages[-1]['content']
+        history = [{"role": "user" if m["type"] == "user" else "model", "parts": [m["content"]]} for m in query.messages]
 
-        # Convert message list to Gemini-compatible history
-        history = [
-            {"role": "user" if msg["type"] == "user" else "model", "parts": [msg["content"]]}
-            for msg in query.messages
-        ]
-
-        print("Formatted history:", history)
-
-        # Combine system prompt with user query
-        full_prompt = SYSTEM_PROMPT + "\nUser Query: " + history[-1]["parts"][0]
-
-        # Start a chat session with Gemini
-        chat = model.start_chat(history=history[:-1])  # Exclude the latest message from history
-        response = chat.send_message(full_prompt)
+        chat = model.start_chat(history=history[:-1])
+        response = chat.send_message(SYSTEM_PROMPT + "\nUser Query: " + user_message)
         answer = response.text.strip()
 
-        print("Generated Answer:", answer)
+        supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+        supabase.table("messages").insert([
+            {"conversation_id": query.conversation_id, "sender": "user", "content": user_message},
+            {"conversation_id": query.conversation_id, "sender": "ai", "content": answer},
+        ]).execute()
 
         return {"answer": answer}
-    
-    except Exception as e:
-        print("Error in /ask:", str(e))
-        return JSONResponse(status_code=500, content={"error": f"Backend error: {str(e)}"})
 
-    
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+@app.get("/conversations/{user_id}")
+async def get_conversations(user_id: str):
+    supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    response = supabase.table("conversations").select("*").eq("user_id", user_id).order("created_at").execute()
+    return response.data
+
+@app.get("/messages/{conversation_id}")
+async def get_messages(conversation_id: str):
+    supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    response = supabase.table("messages").select("*").eq("conversation_id", conversation_id).order("created_at").execute()
+    return response.data
+
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
     file_ext = os.path.splitext(file.filename)[1].lower()
@@ -88,6 +89,6 @@ async def upload_file(file: UploadFile = File(...)):
         shutil.copyfileobj(file.file, buffer)
 
     text = parse_file(temp_path, file_ext)
-
     os.remove(temp_path)
+
     return JSONResponse(content={"text": text})

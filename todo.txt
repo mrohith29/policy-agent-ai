@@ -11,3 +11,52 @@ Multiple conversations support
 Authentication for users
 
 Optimizations for longer contexts (like summarizing older messages)
+
+
+// Structure of Project
+
+policy-agent-ai/
+├── .git/
+├── .vscode/
+├── node_modules/
+├── public/
+├── src/
+│   ├── __pycache__/
+│   ├── components/
+│   │   ├── Button.jsx
+│   │   ├── ConversationItem.jsx
+│   │   ├── DocumentUpload.jsx
+│   │   ├── InputArea.jsx
+│   │   ├── Login.jsx
+│   │   ├── MessageBubble.jsx
+│   │   ├── NavBar.jsx
+│   │   ├── PricingCard.jsx
+│   │   ├── ProfileSidebar.jsx
+│   │   ├── Sidebar.jsx
+│   │   └── Signup.jsx
+│   ├── pages/
+│   │   ├── Account.jsx
+│   │   ├── Chat.jsx
+│   │   ├── DocumentUpload.jsx
+│   │   ├── Home.jsx
+│   │   ├── Pricing.jsx
+│   │   └── Settings.jsx
+│   ├── utils/
+│   │   └── supabase.js
+│   ├── App.css
+│   ├── App.jsx
+│   ├── app.py
+│   ├── index.css
+│   ├── main.jsx
+│   └── parsers.py
+├── .gitignore
+├── eslint.config.js
+├── index.html
+├── MVP.txt
+├── package-lock.json
+├── package.json
+├── postcss.config.js
+├── README.md
+├── tailwind.config.js
+├── todo.txt
+└── vite.config.js
