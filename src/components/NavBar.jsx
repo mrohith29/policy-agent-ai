@@ -27,13 +27,26 @@ const NavBar = () => {
     navigate('/');
   };
 
+  const handleChatClick = (e) => {
+    if (!user) {
+      e.preventDefault();
+      navigate('/login', { replace: true });
+    }
+  };
+
   return (
     <nav className="bg-gray-900 text-white p-4">
       <div className="container mx-auto flex justify-between items-center">
         <Link to="/" className="text-xl font-bold">Policy Agent AI</Link>
         <div className="space-x-4">
           <Link to="/" className="hover:text-indigo-400">Home</Link>
-          <Link to="/chat" className="hover:text-indigo-400">Chat</Link>
+          <Link 
+            to="/chat" 
+            className="hover:text-indigo-400"
+            onClick={handleChatClick}
+          >
+            Chat
+          </Link>
           <Link to="/document-upload" className="hover:text-indigo-400">Upload</Link>
           {user && (
             <>

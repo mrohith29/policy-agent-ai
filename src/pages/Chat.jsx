@@ -16,25 +16,57 @@ const Chat = () => {
   const [docText, setDocText] = useState('');
   const [editingConvId, setEditingConvId] = useState(null);
   const [editingTitle, setEditingTitle] = useState('');
-
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
     const checkSessionAndLoad = async () => {
+      setIsLoading(true);
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) {
-        navigate('/login');
+        navigate('/login', { replace: true });
         return;
       }
 
       const user_id = session.user.id;
 
-      const res = await fetch(`http://localhost:8000/conversations/${user_id}`);
-      const conversations = await res.json();
+      try {
+        const res = await fetch(`http://localhost:8000/conversations/${user_id}`);
+        if (!res.ok) {
+          throw new Error('Failed to fetch conversations');
+        }
+        const conversations = await res.json();
 
-      setHistory(conversations);
-      if (conversations.length > 0) {
-        setActiveConversation(conversations[0].id);
-        loadMessages(conversations[0].id);
+        if (conversations.length > 0) {
+          setHistory(conversations);
+          setActiveConversation(conversations[0].id);
+          loadMessages(conversations[0].id);
+        } else {
+          // If no conversations exist, create a new one automatically
+          const newConvRes = await fetch('http://localhost:8000/conversations', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+              user_id, 
+              title: 'New Conversation' 
+            }),
+          });
+          
+          if (newConvRes.ok) {
+            const newConv = await newConvRes.json();
+            if (newConv?.id) {
+              setHistory([{ id: newConv.id, title: 'New Conversation' }]);
+              setActiveConversation(newConv.id);
+              setMessages([]);
+            }
+          }
+        }
+      } catch (error) {
+        console.error('Error loading conversations:', error);
+        if (!session) {
+          navigate('/login', { replace: true });
+        }
+      } finally {
+        setIsLoading(false);
       }
     };
 
@@ -159,96 +191,104 @@ const Chat = () => {
 
   return (
     <div className="flex h-screen bg-gray-50">
-      <div className="w-72 bg-gray-900 text-white flex flex-col p-4 border-r border-gray-200">
-        <div className="text-lg font-bold mb-6">Conversations</div>
-        <div className="flex-1 overflow-y-auto space-y-2">
-          {history.map(conv => (
-            <button
-              key={conv.id}
-              onClick={() => {
-                setActiveConversation(conv.id);
-                loadMessages(conv.id);
-              }}
-              className={`w-full text-left px-4 py-2 rounded-lg transition-colors ${
-                activeConversation === conv.id ? 'bg-gray-700' : 'hover:bg-gray-800'
-              }`}
-            >
-              {editingConvId === conv.id ? (
-                <input
-                  type="text"
-                  value={editingTitle}
-                  onChange={(e) => setEditingTitle(e.target.value)}
-                  onBlur={() => handleRename(conv.id)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') handleRename(conv.id);
-                  }}
-                  autoFocus
-                  className="bg-gray-800 text-white w-full rounded px-2 py-1"
-                />
-              ) : (
-                <div
-                  onDoubleClick={() => {
-                    setEditingConvId(conv.id);
-                    setEditingTitle(conv.title);
-                  }}
-                >
-                  {conv.title}
-                </div>
-              )}
-            </button>
-          ))}
+      {isLoading ? (
+        <div className="flex-1 flex items-center justify-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-indigo-500"></div>
         </div>
-        <button
-          onClick={handleNewConversation}
-          className="mt-4 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg"
-        >
-          + New Conversation
-        </button>
-      </div>
-
-      <div className="flex flex-col flex-1 h-full">
-        <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          {messages.map((message, index) => (
-            <div
-              key={index}
-              className={`flex ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}
+      ) : (
+        <>
+          <div className="w-72 bg-gray-900 text-white flex flex-col p-4 border-r border-gray-200">
+            <div className="text-lg font-bold mb-6">Conversations</div>
+            <div className="flex-1 overflow-y-auto space-y-2">
+              {history.map(conv => (
+                <button
+                  key={conv.id}
+                  onClick={() => {
+                    setActiveConversation(conv.id);
+                    loadMessages(conv.id);
+                  }}
+                  className={`w-full text-left px-4 py-2 rounded-lg transition-colors ${
+                    activeConversation === conv.id ? 'bg-gray-700' : 'hover:bg-gray-800'
+                  }`}
+                >
+                  {editingConvId === conv.id ? (
+                    <input
+                      type="text"
+                      value={editingTitle}
+                      onChange={(e) => setEditingTitle(e.target.value)}
+                      onBlur={() => handleRename(conv.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleRename(conv.id);
+                      }}
+                      autoFocus
+                      className="bg-gray-800 text-white w-full rounded px-2 py-1"
+                    />
+                  ) : (
+                    <div
+                      onDoubleClick={() => {
+                        setEditingConvId(conv.id);
+                        setEditingTitle(conv.title);
+                      }}
+                    >
+                      {conv.title}
+                    </div>
+                  )}
+                </button>
+              ))}
+            </div>
+            <button
+              onClick={handleNewConversation}
+              className="mt-4 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg"
             >
-              <div
-                className={`max-w-[70%] rounded-lg p-3 ${
-                  message.type === 'user'
-                    ? 'bg-indigo-600 text-white rounded-br-none'
-                    : 'bg-white text-gray-800 rounded-bl-none shadow-md'
-                }`}
-              >
-                {message.content}
+              + New Conversation
+            </button>
+          </div>
+
+          <div className="flex flex-col flex-1 h-full">
+            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+              {messages.map((message, index) => (
+                <div
+                  key={index}
+                  className={`flex ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}
+                >
+                  <div
+                    className={`max-w-[70%] rounded-lg p-3 ${
+                      message.type === 'user'
+                        ? 'bg-indigo-600 text-white rounded-br-none'
+                        : 'bg-white text-gray-800 rounded-bl-none shadow-md'
+                    }`}
+                  >
+                    {message.content}
+                  </div>
+                </div>
+              ))}
+              <div ref={messagesEndRef} />
+            </div>
+
+            <div className="border-t border-gray-200 p-6 bg-white flex justify-center">
+              <div className="p-4 bg-white border-b border-gray-300">
+                <DocumentUpload onDocumentParsed={setDocText} />
+              </div>
+              <div className="flex items-center space-x-4 w-full max-w-xl">
+                <textarea
+                  value={newMessage}
+                  onChange={(e) => setNewMessage(e.target.value)}
+                  onKeyDown={handleKeyPress}
+                  placeholder="Type your message here..."
+                  className="flex-1 p-3 border border-gray-300 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-400 min-h-[44px] max-h-40 overflow-y-auto resize-none"
+                  rows={1}
+                />
+                <button
+                  onClick={handleSendMessage}
+                  className="bg-indigo-600 text-white px-6 py-3 rounded-full hover:bg-indigo-700 transition-colors"
+                >
+                  Send
+                </button>
               </div>
             </div>
-          ))}
-          <div ref={messagesEndRef} />
-        </div>
-
-        <div className="border-t border-gray-200 p-6 bg-white flex justify-center">
-          <div className="p-4 bg-white border-b border-gray-300">
-            <DocumentUpload onDocumentParsed={setDocText} />
           </div>
-          <div className="flex items-center space-x-4 w-full max-w-xl">
-            <textarea
-              value={newMessage}
-              onChange={(e) => setNewMessage(e.target.value)}
-              onKeyDown={handleKeyPress}
-              placeholder="Type your message here..."
-              className="flex-1 p-3 border border-gray-300 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-400 min-h-[44px] max-h-40 overflow-y-auto resize-none"
-              rows={1}
-            />
-            <button
-              onClick={handleSendMessage}
-              className="bg-indigo-600 text-white px-6 py-3 rounded-full hover:bg-indigo-700 transition-colors"
-            >
-              Send
-            </button>
-          </div>
-        </div>
-      </div>
+        </>
+      )}
     </div>
   );
 };
