@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -26,6 +26,13 @@ class MessageIn(BaseModel):
     user_id: str
     conversation_id: str
     messages: List[dict]
+
+class NewConversation(BaseModel):
+    user_id: str
+    title: str
+
+class RenameConversation(BaseModel):
+    title: str
 
 GOOGLE_API_KEY = os.getenv("GEMINI_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -92,3 +99,19 @@ async def upload_file(file: UploadFile = File(...)):
     os.remove(temp_path)
 
     return JSONResponse(content={"text": text})
+
+@app.post("/conversations")
+async def create_conversation(conv: NewConversation):
+    supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    response = supabase.table("conversations").insert({"user_id": conv.user_id, "title": conv.title}).execute()
+    if response.data:
+        return {"id": response.data[0]["id"]}
+    raise HTTPException(status_code=500, detail="Failed to create conversation")
+
+@app.put("/conversations/{conversation_id}")
+async def rename_conversation(conversation_id: str, body: RenameConversation):
+    supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    response = supabase.table("conversations").update({"title": body.title}).eq("id", conversation_id).execute()
+    if response.data:
+        return {"status": "success"}
+    raise HTTPException(status_code=500, detail="Failed to rename conversation")

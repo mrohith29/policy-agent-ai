@@ -14,6 +14,9 @@ const Chat = () => {
   const messagesEndRef = useRef(null);
   const questionAddedRef = useRef(false);
   const [docText, setDocText] = useState('');
+  const [editingConvId, setEditingConvId] = useState(null);
+  const [editingTitle, setEditingTitle] = useState('');
+
 
   useEffect(() => {
     const checkSessionAndLoad = async () => {
@@ -103,29 +106,48 @@ const Chat = () => {
   const handleNewConversation = async () => {
     const { data: { session } } = await supabase.auth.getSession();
     const user_id = session.user.id;
-
+  
     const title = `Conversation ${history.length + 1}`;
-
-    const res = await fetch('https://YOUR_SUPABASE_PROJECT.supabase.co/rest/v1/conversations', {
+  
+    const res = await fetch('http://localhost:8000/conversations', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        apikey: process.env.REACT_APP_SUPABASE_ANON_KEY,
-        Authorization: `Bearer ${session.access_token}`,
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ user_id, title }),
     });
-
+  
     const newConv = await res.json();
-
-    if (newConv && newConv[0]?.id) {
-      const newConvId = newConv[0].id;
-      const newConversation = { id: newConvId, title };
-
+  
+    if (newConv?.id) {
+      const newConversation = { id: newConv.id, title };
       setHistory(prev => [...prev, newConversation]);
-      setActiveConversation(newConvId);
+      setActiveConversation(newConv.id);
       setMessages([]);
     }
+  };
+
+  const handleRename = async (convId) => {
+    if (!editingTitle.trim()) return;
+  
+    try {
+      const res = await fetch(`http://localhost:8000/conversations/${convId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: editingTitle }),
+      });
+  
+      if (res.ok) {
+        setHistory(prev =>
+          prev.map(conv =>
+            conv.id === convId ? { ...conv, title: editingTitle } : conv
+          )
+        );
+      }
+    } catch (err) {
+      console.error("Failed to rename:", err);
+    }
+  
+    setEditingConvId(null);
+    setEditingTitle('');
   };
 
   const handleKeyPress = (e) => {
@@ -151,7 +173,28 @@ const Chat = () => {
                 activeConversation === conv.id ? 'bg-gray-700' : 'hover:bg-gray-800'
               }`}
             >
-              {conv.title}
+              {editingConvId === conv.id ? (
+                <input
+                  type="text"
+                  value={editingTitle}
+                  onChange={(e) => setEditingTitle(e.target.value)}
+                  onBlur={() => handleRename(conv.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleRename(conv.id);
+                  }}
+                  autoFocus
+                  className="bg-gray-800 text-white w-full rounded px-2 py-1"
+                />
+              ) : (
+                <div
+                  onDoubleClick={() => {
+                    setEditingConvId(conv.id);
+                    setEditingTitle(conv.title);
+                  }}
+                >
+                  {conv.title}
+                </div>
+              )}
             </button>
           ))}
         </div>

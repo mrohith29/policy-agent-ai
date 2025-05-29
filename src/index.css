@@ -19,23 +19,26 @@
 
 @layer components {
   .btn {
-    @apply inline-flex items-center justify-center rounded-md font-medium transition-colors 
-    focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:opacity-50 
-    disabled:pointer-events-none ring-offset-white;
+    @apply inline-flex items-center justify-center rounded-lg px-5 py-2.5 text-sm font-semibold transition-all duration-200 ease-in-out
+    focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none
+    ring-offset-white shadow-sm;
   }
-
+  
+  /* Primary: vibrant, 3D effect, sharp hover & active transitions */
   .btn-primary {
-    @apply bg-gradient-to-r from-indigo-500 to-indigo-600 text-white hover:from-indigo-600 hover:to-indigo-700
-    focus-visible:ring-indigo-500;
+    @apply bg-indigo-600 text-white shadow-md hover:shadow-lg hover:-translate-y-0.5 active:translate-y-0 active:shadow-sm
+    hover:bg-indigo-700 active:bg-indigo-800 focus-visible:ring-indigo-500;
   }
-
+  
+  /* Secondary: polished white button, clear hover effect, visible border */
   .btn-secondary {
-    @apply bg-white text-gray-900 border border-gray-200 hover:bg-gray-100 hover:text-gray-900
-    focus-visible:ring-gray-500;
+    @apply bg-indigo-600 text-white shadow-md hover:shadow-lg hover:-translate-y-0.5 active:translate-y-0 active:shadow-sm
+    hover:bg-indigo-700 active:bg-indigo-800 focus-visible:ring-indigo-500;
   }
-
+  
+  
   .btn-ghost {
-    @apply bg-transparent hover:bg-gray-100 text-gray-700 hover:text-gray-900;
+    @apply text-gray-700 hover:bg-gray-100 active:bg-gray-200;
   }
 
   .input {
