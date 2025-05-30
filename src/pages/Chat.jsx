@@ -1,11 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { supabase } from '../utils/supabase';
 import DocumentUpload from './DocumentUpload';
+import { Pencil } from 'lucide-react';
 
 const Chat = () => {
   const location = useLocation();
   const navigate = useNavigate();
+  const { conversationId } = useParams();
   const { question } = location.state || { question: '' };
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
@@ -38,10 +40,15 @@ const Chat = () => {
 
         if (conversations.length > 0) {
           setHistory(conversations);
-          setActiveConversation(conversations[0].id);
-          loadMessages(conversations[0].id);
+          
+          const targetConvId = conversationId || conversations[0].id;
+          setActiveConversation(targetConvId);
+          loadMessages(targetConvId);
+          
+          if (!conversationId) {
+            navigate(`/chat/${targetConvId}`, { replace: true });
+          }
         } else {
-          // If no conversations exist, create a new one automatically
           const newConvRes = await fetch('http://localhost:8000/conversations', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -56,6 +63,7 @@ const Chat = () => {
             if (newConv?.id) {
               setHistory([{ id: newConv.id, title: 'New Conversation' }]);
               setActiveConversation(newConv.id);
+              navigate(`/chat/${newConv.id}`, { replace: true });
               setMessages([]);
             }
           }
@@ -71,7 +79,7 @@ const Chat = () => {
     };
 
     checkSessionAndLoad();
-  }, [navigate]);
+  }, [navigate, conversationId]);
 
   const loadMessages = async (conversation_id) => {
     const res = await fetch(`http://localhost:8000/messages/${conversation_id}`);
@@ -153,6 +161,7 @@ const Chat = () => {
       const newConversation = { id: newConv.id, title };
       setHistory(prev => [...prev, newConversation]);
       setActiveConversation(newConv.id);
+      navigate(`/chat/${newConv.id}`);
       setMessages([]);
     }
   };
@@ -162,10 +171,11 @@ const Chat = () => {
   
     try {
       const res = await fetch(`http://localhost:8000/conversations/${convId}`, {
-        method: 'PATCH',
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title: editingTitle }),
       });
+      console.log(convId)
   
       if (res.ok) {
         setHistory(prev =>
@@ -173,9 +183,14 @@ const Chat = () => {
             conv.id === convId ? { ...conv, title: editingTitle } : conv
           )
         );
+      } else {
+        const error = await res.json();
+        console.error("Failed to rename:", error.detail || "Unknown error");
+        // Optionally show an error message to the user
       }
     } catch (err) {
       console.error("Failed to rename:", err);
+      // Optionally show an error message to the user
     }
   
     setEditingConvId(null);
@@ -187,6 +202,12 @@ const Chat = () => {
       e.preventDefault();
       handleSendMessage();
     }
+  };
+
+  const handleConversationSelect = (convId) => {
+    setActiveConversation(convId);
+    loadMessages(convId);
+    navigate(`/chat/${convId}`);
   };
 
   return (
@@ -203,10 +224,7 @@ const Chat = () => {
               {history.map(conv => (
                 <button
                   key={conv.id}
-                  onClick={() => {
-                    setActiveConversation(conv.id);
-                    loadMessages(conv.id);
-                  }}
+                  onClick={() => handleConversationSelect(conv.id)}
                   className={`w-full text-left px-4 py-2 rounded-lg transition-colors ${
                     activeConversation === conv.id ? 'bg-gray-700' : 'hover:bg-gray-800'
                   }`}
@@ -229,8 +247,13 @@ const Chat = () => {
                         setEditingConvId(conv.id);
                         setEditingTitle(conv.title);
                       }}
+                      className="flex items-center justify-between group"
                     >
-                      {conv.title}
+                      <span>{conv.title}</span>
+                      <Pencil 
+                        size={14} 
+                        className="opacity-0 group-hover:opacity-100 transition-opacity text-gray-400 hover:text-white"
+                      />
                     </div>
                   )}
                 </button>

@@ -192,6 +192,10 @@ function App() {
             <Route path="/" element={<HomePage session={session} />} />
             <Route 
               path="/chat" 
+              element={session ? <Navigate to="/chat/new" replace /> : <Navigate to="/login" replace />} 
+            />
+            <Route 
+              path="/chat/:conversationId" 
               element={session ? <Chat /> : <Navigate to="/login" replace />} 
             />
             <Route path="/pricing" element={<Pricing />} />
