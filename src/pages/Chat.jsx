@@ -3,6 +3,7 @@ import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { supabase } from '../utils/supabase';
 import DocumentUpload from './DocumentUpload';
 import { Pencil } from 'lucide-react';
+import { API_BASE_URL, apiCall } from '../utils/api';
 
 const Chat = () => {
   const location = useLocation();
@@ -32,12 +33,8 @@ const Chat = () => {
       const user_id = session.user.id;
 
       try {
-        const res = await fetch(`http://localhost:8000/conversations/${user_id}`);
-        if (!res.ok) {
-          throw new Error('Failed to fetch conversations');
-        }
-        const conversations = await res.json();
-
+        const conversations = await apiCall(`/conversations/${user_id}`);
+        
         if (conversations.length > 0) {
           setHistory(conversations);
           
@@ -49,23 +46,19 @@ const Chat = () => {
             navigate(`/chat/${targetConvId}`, { replace: true });
           }
         } else {
-          const newConvRes = await fetch('http://localhost:8000/conversations', {
+          const newConv = await apiCall('/conversations', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ 
               user_id, 
               title: 'New Conversation' 
             }),
           });
           
-          if (newConvRes.ok) {
-            const newConv = await newConvRes.json();
-            if (newConv?.id) {
-              setHistory([{ id: newConv.id, title: 'New Conversation' }]);
-              setActiveConversation(newConv.id);
-              navigate(`/chat/${newConv.id}`, { replace: true });
-              setMessages([]);
-            }
+          if (newConv?.id) {
+            setHistory([{ id: newConv.id, title: 'New Conversation' }]);
+            setActiveConversation(newConv.id);
+            navigate(`/chat/${newConv.id}`, { replace: true });
+            setMessages([]);
           }
         }
       } catch (error) {
@@ -82,13 +75,17 @@ const Chat = () => {
   }, [navigate, conversationId]);
 
   const loadMessages = async (conversation_id) => {
-    const res = await fetch(`http://localhost:8000/messages/${conversation_id}`);
-    const data = await res.json();
-    const formatted = data.map(msg => ({
-      type: msg.sender === 'user' ? 'user' : 'ai',
-      content: msg.content,
-    }));
-    setMessages(formatted);
+    try {
+      const data = await apiCall(`/messages/${conversation_id}`);
+      const formatted = data.map(msg => ({
+        type: msg.sender === 'user' ? 'user' : 'ai',
+        content: msg.content,
+      }));
+      setMessages(formatted);
+    } catch (error) {
+      console.error('Error loading messages:', error);
+      setMessages([]);
+    }
   };
 
   useEffect(() => {
@@ -121,9 +118,8 @@ const Chat = () => {
         return;
       }
 
-      const res = await fetch('http://localhost:8000/ask', {
+      const data = await apiCall('/ask', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           user_id,
           conversation_id: activeConversation,
@@ -131,38 +127,38 @@ const Chat = () => {
         }),
       });
 
-      const data = await res.json();
-      if (res.ok && data.answer) {
+      if (data.answer) {
         setMessages(prev => [...prev, { type: 'ai', content: data.answer }]);
       } else {
         setMessages(prev => [...prev, { type: 'ai', content: `Error: ${data.error}` }]);
       }
     } catch (err) {
-      console.error(err);
+      console.error('Error sending message:', err);
       setMessages(prev => [...prev, { type: 'ai', content: 'Network error occurred.' }]);
     }
   };
 
   const handleNewConversation = async () => {
-    const { data: { session } } = await supabase.auth.getSession();
-    const user_id = session.user.id;
-  
-    const title = `Conversation ${history.length + 1}`;
-  
-    const res = await fetch('http://localhost:8000/conversations', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user_id, title }),
-    });
-  
-    const newConv = await res.json();
-  
-    if (newConv?.id) {
-      const newConversation = { id: newConv.id, title };
-      setHistory(prev => [...prev, newConversation]);
-      setActiveConversation(newConv.id);
-      navigate(`/chat/${newConv.id}`);
-      setMessages([]);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const user_id = session.user.id;
+    
+      const title = `Conversation ${history.length + 1}`;
+    
+      const newConv = await apiCall('/conversations', {
+        method: 'POST',
+        body: JSON.stringify({ user_id, title }),
+      });
+    
+      if (newConv?.id) {
+        const newConversation = { id: newConv.id, title };
+        setHistory(prev => [...prev, newConversation]);
+        setActiveConversation(newConv.id);
+        navigate(`/chat/${newConv.id}`);
+        setMessages([]);
+      }
+    } catch (error) {
+      console.error('Error creating new conversation:', error);
     }
   };
 
@@ -170,27 +166,18 @@ const Chat = () => {
     if (!editingTitle.trim()) return;
   
     try {
-      const res = await fetch(`http://localhost:8000/conversations/${convId}`, {
+      await apiCall(`/conversations/${convId}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title: editingTitle }),
       });
-      console.log(convId)
   
-      if (res.ok) {
-        setHistory(prev =>
-          prev.map(conv =>
-            conv.id === convId ? { ...conv, title: editingTitle } : conv
-          )
-        );
-      } else {
-        const error = await res.json();
-        console.error("Failed to rename:", error.detail || "Unknown error");
-        // Optionally show an error message to the user
-      }
+      setHistory(prev =>
+        prev.map(conv =>
+          conv.id === convId ? { ...conv, title: editingTitle } : conv
+        )
+      );
     } catch (err) {
       console.error("Failed to rename:", err);
-      // Optionally show an error message to the user
     }
   
     setEditingConvId(null);

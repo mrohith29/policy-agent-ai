@@ -1,6 +1,7 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from typing import List
@@ -9,18 +10,23 @@ import os
 import google.generativeai as genai
 from supabase import create_client
 from .parsers import parse_file
+from pyngrok import ngrok
 
 load_dotenv()
 
 app = FastAPI()
 
+# Configure CORS to allow all origins when using ngrok
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["*"],  # Allow all origins
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Mount the static files first
+app.mount("/assets", StaticFiles(directory="dist/assets"), name="assets")
 
 class MessageIn(BaseModel):
     user_id: str
@@ -53,7 +59,8 @@ You're a helpful assistant specialized in understanding and explaining documents
 Please maintain a humble and friendly tone. If a question is out of scope or unclear, kindly ask for clarification or explain politely why it's difficult to answer.
 """
 
-@app.post("/ask")
+# API Routes
+@app.post("/api/ask")
 async def ask_question(query: MessageIn):
     try:
         user_message = query.messages[-1]['content']
@@ -75,19 +82,19 @@ async def ask_question(query: MessageIn):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-@app.get("/conversations/{user_id}")
+@app.get("/api/conversations/{user_id}")
 async def get_conversations(user_id: str):
     supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
     response = supabase.table("conversations").select("*").eq("user_id", user_id).order("created_at").execute()
     return response.data
 
-@app.get("/messages/{conversation_id}")
+@app.get("/api/messages/{conversation_id}")
 async def get_messages(conversation_id: str):
     supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
     response = supabase.table("messages").select("*").eq("conversation_id", conversation_id).order("created_at").execute()
     return response.data
 
-@app.post("/upload")
+@app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...)):
     file_ext = os.path.splitext(file.filename)[1].lower()
     temp_path = f"temp_uploaded{file_ext}"
@@ -100,7 +107,7 @@ async def upload_file(file: UploadFile = File(...)):
 
     return JSONResponse(content={"text": text})
 
-@app.post("/conversations")
+@app.post("/api/conversations")
 async def create_conversation(conv: NewConversation):
     supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
     response = supabase.table("conversations").insert({"user_id": conv.user_id, "title": conv.title}).execute()
@@ -108,10 +115,26 @@ async def create_conversation(conv: NewConversation):
         return {"id": response.data[0]["id"]}
     raise HTTPException(status_code=500, detail="Failed to create conversation")
 
-@app.put("/conversations/{conversation_id}")
+@app.put("/api/conversations/{conversation_id}")
 async def rename_conversation(conversation_id: str, body: RenameConversation):
     supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
     response = supabase.table("conversations").update({"title": body.title}).eq("id", conversation_id).execute()
     if response.data:
         return {"status": "success"}
     raise HTTPException(status_code=500, detail="Failed to rename conversation")
+
+# Serve the frontend index.html for all other routes
+@app.get("/{full_path:path}")
+async def serve_frontend(full_path: str):
+    return FileResponse("dist/index.html")
+
+if __name__ == "__main__":
+    import uvicorn
+    
+    # Open a ngrok tunnel to the HTTP server
+    public_url = ngrok.connect(8000)
+    print(f" * ngrok tunnel \"{public_url}\" -> http://127.0.0.1:8000")
+    print(f" * Share this URL with your friend: {public_url}")
+    
+    # Start the FastAPI application
+    uvicorn.run(app, host="0.0.0.0", port=8000)
