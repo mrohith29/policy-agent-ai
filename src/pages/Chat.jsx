@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { supabase } from '../utils/supabase';
 import DocumentUpload from './DocumentUpload';
-import { Pencil } from 'lucide-react';
+import { MoreVertical, Send, Loader2, Trash2, Pencil } from 'lucide-react';
+import { DocumentPreview, MessageReaction, AIPersonalitySelector, CategorySelector } from '../components/ChatComponents';
 
 const Chat = () => {
   const location = useLocation();
@@ -18,7 +19,19 @@ const Chat = () => {
   const [docText, setDocText] = useState('');
   const [editingConvId, setEditingConvId] = useState(null);
   const [editingTitle, setEditingTitle] = useState('');
+  const [openMenuId, setOpenMenuId] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
+  
+  // New state variables for chat components
+  const [showDocumentPreview, setShowDocumentPreview] = useState(false);
+  const [previewContent, setPreviewContent] = useState('');
+  const [previewFilename, setPreviewFilename] = useState('');
+  const [showPersonalitySelector, setShowPersonalitySelector] = useState(false);
+  const [currentPersonality, setCurrentPersonality] = useState('default');
+  const [showCategorySelector, setShowCategorySelector] = useState(false);
+  const [currentCategory, setCurrentCategory] = useState('general');
+  const [messageReactions, setMessageReactions] = useState({});
+  const [isSending, setIsSending] = useState(false);
 
   useEffect(() => {
     const checkSessionAndLoad = async () => {
@@ -89,6 +102,7 @@ const Chat = () => {
       content: msg.content,
     }));
     setMessages(formatted);
+    setTimeout(scrollToBottom, 100);
   };
 
   useEffect(() => {
@@ -104,13 +118,22 @@ const Chat = () => {
     }
   }, [docText]);
 
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
   const handleSendMessage = async () => {
-    if (newMessage.trim() === '') return;
+    if (newMessage.trim() === '' || isSending) return;
 
     const newMsg = { type: 'user', content: newMessage };
     const updatedMessages = [...messages, newMsg];
     setMessages(updatedMessages);
     setNewMessage('');
+    setIsSending(true);
 
     try {
       const { data: { session } } = await supabase.auth.getSession();
@@ -140,6 +163,8 @@ const Chat = () => {
     } catch (err) {
       console.error(err);
       setMessages(prev => [...prev, { type: 'ai', content: 'Network error occurred.' }]);
+    } finally {
+      setIsSending(false);
     }
   };
 
@@ -210,6 +235,105 @@ const Chat = () => {
     navigate(`/chat/${convId}`);
   };
 
+  // New handler functions for chat components
+  const handleDocumentPreview = (content, filename) => {
+    setPreviewContent(content);
+    setPreviewFilename(filename);
+    setShowDocumentPreview(true);
+  };
+
+  const handlePersonalitySelect = (personalityId) => {
+    setCurrentPersonality(personalityId);
+    setShowPersonalitySelector(false);
+  };
+
+  const handleCategorySelect = (categoryId) => {
+    setCurrentCategory(categoryId);
+    setShowCategorySelector(false);
+  };
+
+  const handleMessageReaction = (messageId, reactionType) => {
+    setMessageReactions(prev => {
+      const messageReactions = prev[messageId] || [];
+      const hasReaction = messageReactions.includes(reactionType);
+      
+      return {
+        ...prev,
+        [messageId]: hasReaction
+          ? messageReactions.filter(r => r !== reactionType)
+          : [...messageReactions, reactionType]
+      };
+    });
+  };
+
+  const handleDeleteConversation = async (convId) => {
+    if (!window.confirm('Are you sure you want to delete this conversation?')) {
+      return;
+    }
+
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        console.error("No active session");
+        return;
+      }
+
+      // Log the request details for debugging
+      console.log('Attempting to delete conversation:', convId);
+      console.log('User session:', session.user.id);
+
+      const res = await fetch(`http://localhost:8000/conversations/${convId}`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session.access_token}`,
+          'user_id': session.user.id
+        }
+      });
+
+      // Log the response for debugging
+      console.log('Delete response status:', res.status);
+      const responseData = await res.json().catch(() => null);
+      console.log('Delete response data:', responseData);
+
+      if (res.ok) {
+        // Remove the conversation from history
+        setHistory(prev => prev.filter(conv => conv.id !== convId));
+        
+        // If the deleted conversation was active, switch to another one
+        if (activeConversation === convId) {
+          const remainingConversations = history.filter(conv => conv.id !== convId);
+          if (remainingConversations.length > 0) {
+            handleConversationSelect(remainingConversations[0].id);
+          } else {
+            handleNewConversation();
+          }
+        }
+      } else {
+        const errorMessage = responseData?.detail || 'Failed to delete conversation';
+        console.error("Failed to delete conversation:", errorMessage);
+        alert(`Failed to delete conversation: ${errorMessage}`);
+      }
+    } catch (err) {
+      console.error("Error during delete operation:", err);
+      alert("An error occurred while deleting the conversation. Please try again.");
+    }
+  };
+
+  // Add click outside handler for menu
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (openMenuId && !event.target.closest('.conversation-menu')) {
+        setOpenMenuId(null);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [openMenuId]);
+
   return (
     <div className="flex h-screen bg-gray-50">
       {isLoading ? (
@@ -222,41 +346,71 @@ const Chat = () => {
             <div className="text-lg font-bold mb-6">Conversations</div>
             <div className="flex-1 overflow-y-auto space-y-2">
               {history.map(conv => (
-                <button
+                <div
                   key={conv.id}
-                  onClick={() => handleConversationSelect(conv.id)}
-                  className={`w-full text-left px-4 py-2 rounded-lg transition-colors ${
+                  className={`group flex items-center justify-between px-4 py-2 rounded-lg transition-colors ${
                     activeConversation === conv.id ? 'bg-gray-700' : 'hover:bg-gray-800'
                   }`}
                 >
-                  {editingConvId === conv.id ? (
-                    <input
-                      type="text"
-                      value={editingTitle}
-                      onChange={(e) => setEditingTitle(e.target.value)}
-                      onBlur={() => handleRename(conv.id)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') handleRename(conv.id);
-                      }}
-                      autoFocus
-                      className="bg-gray-800 text-white w-full rounded px-2 py-1"
-                    />
-                  ) : (
-                    <div
-                      onDoubleClick={() => {
-                        setEditingConvId(conv.id);
-                        setEditingTitle(conv.title);
-                      }}
-                      className="flex items-center justify-between group"
-                    >
-                      <span>{conv.title}</span>
-                      <Pencil 
-                        size={14} 
-                        className="opacity-0 group-hover:opacity-100 transition-opacity text-gray-400 hover:text-white"
+                  <button
+                    onClick={() => handleConversationSelect(conv.id)}
+                    className="flex-1 text-left"
+                  >
+                    {editingConvId === conv.id ? (
+                      <input
+                        type="text"
+                        value={editingTitle}
+                        onChange={(e) => setEditingTitle(e.target.value)}
+                        onBlur={() => handleRename(conv.id)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleRename(conv.id);
+                        }}
+                        autoFocus
+                        className="bg-gray-800 text-white w-full rounded px-2 py-1"
                       />
-                    </div>
-                  )}
-                </button>
+                    ) : (
+                      <span className="truncate">{conv.title}</span>
+                    )}
+                  </button>
+                  <div className="relative conversation-menu">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setOpenMenuId(openMenuId === conv.id ? null : conv.id);
+                      }}
+                      className="p-1 rounded-full hover:bg-gray-700 text-gray-400 hover:text-white transition-colors"
+                    >
+                      <MoreVertical size={14} />
+                    </button>
+                    {openMenuId === conv.id && (
+                      <div className="absolute right-0 mt-1 w-48 bg-gray-800 rounded-lg shadow-lg py-1 z-10">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setEditingTitle(conv.title);
+                            setEditingConvId(conv.id);
+                            setOpenMenuId(null);
+                          }}
+                          className="w-full px-4 py-2 text-left text-sm text-gray-300 hover:bg-gray-700 flex items-center space-x-2"
+                        >
+                          <Pencil size={14} />
+                          <span>Rename</span>
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteConversation(conv.id);
+                            setOpenMenuId(null);
+                          }}
+                          className="w-full px-4 py-2 text-left text-sm text-red-400 hover:bg-gray-700 flex items-center space-x-2"
+                        >
+                          <Trash2 size={14} />
+                          <span>Delete</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
               ))}
             </div>
             <button
@@ -268,6 +422,24 @@ const Chat = () => {
           </div>
 
           <div className="flex flex-col flex-1 h-full">
+            <div className="flex justify-between items-center p-4 border-b bg-white">
+              <div className="flex items-center space-x-4">
+                <button
+                  onClick={() => setShowPersonalitySelector(true)}
+                  className="flex items-center space-x-2 px-3 py-2 rounded-lg hover:bg-gray-100 text-gray-700"
+                >
+                  <span className="text-sm font-medium">AI Personality</span>
+                  <span className="text-xs text-gray-500">({currentPersonality})</span>
+                </button>
+                <button
+                  onClick={() => setShowCategorySelector(true)}
+                  className="flex items-center space-x-2 px-3 py-2 rounded-lg hover:bg-gray-100 text-gray-700"
+                >
+                  <span className="text-sm font-medium">Category</span>
+                  <span className="text-xs text-gray-500">({currentCategory})</span>
+                </button>
+              </div>
+            </div>
             <div className="flex-1 overflow-y-auto p-4 space-y-4">
               {messages.map((message, index) => (
                 <div
@@ -282,6 +454,12 @@ const Chat = () => {
                     }`}
                   >
                     {message.content}
+                    <MessageReaction
+                      messageId={index}
+                      reactions={messageReactions[index] || []}
+                      onReact={handleMessageReaction}
+                      messageContent={message.content}
+                    />
                   </div>
                 </div>
               ))}
@@ -297,19 +475,54 @@ const Chat = () => {
                   value={newMessage}
                   onChange={(e) => setNewMessage(e.target.value)}
                   onKeyDown={handleKeyPress}
-                  placeholder="Type your message here..."
-                  className="flex-1 p-3 border border-gray-300 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-400 min-h-[44px] max-h-40 overflow-y-auto resize-none"
+                  placeholder={isSending ? "Waiting for response..." : "Type your message here..."}
+                  className={`flex-1 p-3 border border-gray-300 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-400 min-h-[44px] max-h-40 overflow-y-auto resize-none ${
+                    isSending ? 'bg-gray-50 cursor-not-allowed' : ''
+                  }`}
                   rows={1}
+                  disabled={isSending}
                 />
                 <button
                   onClick={handleSendMessage}
-                  className="bg-indigo-600 text-white px-6 py-3 rounded-full hover:bg-indigo-700 transition-colors"
+                  disabled={isSending || !newMessage.trim()}
+                  className={`flex items-center justify-center bg-indigo-600 text-white px-6 py-3 rounded-full transition-colors ${
+                    isSending || !newMessage.trim() 
+                      ? 'opacity-50 cursor-not-allowed' 
+                      : 'hover:bg-indigo-700'
+                  }`}
                 >
-                  Send
+                  {isSending ? (
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : (
+                    <Send className="w-5 h-5" />
+                  )}
                 </button>
               </div>
             </div>
           </div>
+
+          {/* Modals */}
+          {showDocumentPreview && (
+            <DocumentPreview
+              content={previewContent}
+              filename={previewFilename}
+              onClose={() => setShowDocumentPreview(false)}
+            />
+          )}
+
+          {showPersonalitySelector && (
+            <AIPersonalitySelector
+              currentPersonality={currentPersonality}
+              onSelect={handlePersonalitySelect}
+            />
+          )}
+
+          {showCategorySelector && (
+            <CategorySelector
+              currentCategory={currentCategory}
+              onSelect={handleCategorySelect}
+            />
+          )}
         </>
       )}
     </div>

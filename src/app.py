@@ -115,3 +115,20 @@ async def rename_conversation(conversation_id: str, body: RenameConversation):
     if response.data:
         return {"status": "success"}
     raise HTTPException(status_code=500, detail="Failed to rename conversation")
+
+@app.delete("/conversations/{conversation_id}")
+async def delete_conversation(conversation_id: str):
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        
+        # First delete all messages in the conversation
+        supabase.table("messages").delete().eq("conversation_id", conversation_id).execute()
+        
+        # Then delete the conversation itself
+        response = supabase.table("conversations").delete().eq("id", conversation_id).execute()
+        
+        if response.data:
+            return {"status": "success", "message": "Conversation deleted successfully"}
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
