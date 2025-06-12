@@ -1,9 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { supabase } from '../utils/supabase';
-import DocumentUpload from './DocumentUpload';
-import { MoreVertical, Send, Loader2, Trash2, Pencil } from 'lucide-react';
+import { MoreVertical, Send, Loader2, Trash2, Pencil, WifiOff } from 'lucide-react';
 import { DocumentPreview, MessageReaction, AIPersonalitySelector, CategorySelector } from '../components/ChatComponents';
+import ConversationSidebar from '../components/ConversationSidebar';
+import ChatHeader from '../components/ChatHeader';
+import ChatMessages from '../components/ChatMessages';
+import ChatInput from '../components/ChatInput';
+import OfflineBanner from '../components/OfflineBanner';
+import { useOffline } from '../hooks/useOffline';
+import { saveMessages } from '../utils/offlineUtils';
 
 const Chat = () => {
   const location = useLocation();
@@ -33,6 +39,8 @@ const Chat = () => {
   const [messageReactions, setMessageReactions] = useState({});
   const [isSending, setIsSending] = useState(false);
 
+  const { isOffline, queueLength, error, queueMessage, loadMessages: loadMessagesWithOffline } = useOffline(activeConversation);
+
   useEffect(() => {
     const checkSessionAndLoad = async () => {
       setIsLoading(true);
@@ -56,7 +64,8 @@ const Chat = () => {
           
           const targetConvId = conversationId || conversations[0].id;
           setActiveConversation(targetConvId);
-          loadMessages(targetConvId);
+          const loadedMessages = await loadMessagesWithOffline(targetConvId);
+          setMessages(loadedMessages);
           
           if (!conversationId) {
             navigate(`/chat/${targetConvId}`, { replace: true });
@@ -94,38 +103,6 @@ const Chat = () => {
     checkSessionAndLoad();
   }, [navigate, conversationId]);
 
-  const loadMessages = async (conversation_id) => {
-    const res = await fetch(`http://localhost:8000/messages/${conversation_id}`);
-    const data = await res.json();
-    const formatted = data.map(msg => ({
-      type: msg.sender === 'user' ? 'user' : 'ai',
-      content: msg.content,
-    }));
-    setMessages(formatted);
-    setTimeout(scrollToBottom, 100);
-  };
-
-  useEffect(() => {
-    if (question && !questionAddedRef.current && activeConversation) {
-      setMessages(prev => [...prev, { type: 'user', content: question }]);
-      questionAddedRef.current = true;
-    }
-  }, [question, activeConversation]);
-
-  useEffect(() => {
-    if (docText) {
-      setMessages(prev => [...prev, { type: 'user', content: `Uploaded Document Content:\n${docText}` }]);
-    }
-  }, [docText]);
-
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  };
-
-  useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
-
   const handleSendMessage = async () => {
     if (newMessage.trim() === '' || isSending) return;
 
@@ -144,6 +121,24 @@ const Chat = () => {
         return;
       }
 
+      if (isOffline) {
+        const messageData = {
+          conversation_id: activeConversation,
+          messages: updatedMessages,
+          user_id,
+          timestamp: new Date().toISOString()
+        };
+        
+        queueMessage(messageData);
+        saveMessages(activeConversation, updatedMessages);
+        
+        setMessages(prev => [...prev, { 
+          type: 'ai', 
+          content: 'Message queued for sending when back online.' 
+        }]);
+        return;
+      }
+
       const res = await fetch('http://localhost:8000/ask', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -156,7 +151,9 @@ const Chat = () => {
 
       const data = await res.json();
       if (res.ok && data.answer) {
-        setMessages(prev => [...prev, { type: 'ai', content: data.answer }]);
+        const finalMessages = [...updatedMessages, { type: 'ai', content: data.answer }];
+        setMessages(finalMessages);
+        saveMessages(activeConversation, finalMessages);
       } else {
         setMessages(prev => [...prev, { type: 'ai', content: `Error: ${data.error}` }]);
       }
@@ -191,35 +188,36 @@ const Chat = () => {
     }
   };
 
-  const handleRename = async (convId) => {
-    if (!editingTitle.trim()) return;
-  
+  const handleRename = async (convId, newTitle) => {
+    if (!convId || !newTitle.trim()) return;
+
     try {
       const res = await fetch(`http://localhost:8000/conversations/${convId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: editingTitle }),
+        body: JSON.stringify({ title: newTitle }),
       });
-      console.log(convId)
-  
-      if (res.ok) {
-        setHistory(prev =>
-          prev.map(conv =>
-            conv.id === convId ? { ...conv, title: editingTitle } : conv
-          )
-        );
-      } else {
-        const error = await res.json();
-        console.error("Failed to rename:", error.detail || "Unknown error");
-        // Optionally show an error message to the user
+
+      if (!res.ok) {
+        throw new Error('Failed to rename conversation');
       }
-    } catch (err) {
-      console.error("Failed to rename:", err);
-      // Optionally show an error message to the user
+
+      // Update the conversation in the history
+      setHistory(prev => prev.map(conv => 
+        conv.id === convId ? { ...conv, title: newTitle } : conv
+      ));
+
+      // If this is the active conversation, update it as well
+      if (activeConversation === convId) {
+        setActiveConversation(prev => ({
+          ...prev,
+          title: newTitle
+        }));
+      }
+    } catch (error) {
+      console.error('Error renaming conversation:', error);
+      // You might want to show an error message to the user here
     }
-  
-    setEditingConvId(null);
-    setEditingTitle('');
   };
 
   const handleKeyPress = (e) => {
@@ -231,7 +229,7 @@ const Chat = () => {
 
   const handleConversationSelect = (convId) => {
     setActiveConversation(convId);
-    loadMessages(convId);
+    loadMessagesWithOffline(convId);
     navigate(`/chat/${convId}`);
   };
 
@@ -335,196 +333,62 @@ const Chat = () => {
   }, [openMenuId]);
 
   return (
-    <div className="flex h-screen bg-gray-50">
-      {isLoading ? (
-        <div className="flex-1 flex items-center justify-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-indigo-500"></div>
-        </div>
-      ) : (
-        <>
-          <div className="w-72 bg-gray-900 text-white flex flex-col p-4 border-r border-gray-200">
-            <div className="text-lg font-bold mb-6">Conversations</div>
-            <div className="flex-1 overflow-y-auto space-y-2">
-              {history.map(conv => (
-                <div
-                  key={conv.id}
-                  className={`group flex items-center justify-between px-4 py-2 rounded-lg transition-colors ${
-                    activeConversation === conv.id ? 'bg-gray-700' : 'hover:bg-gray-800'
-                  }`}
-                >
-                  <button
-                    onClick={() => handleConversationSelect(conv.id)}
-                    className="flex-1 text-left"
-                  >
-                    {editingConvId === conv.id ? (
-                      <input
-                        type="text"
-                        value={editingTitle}
-                        onChange={(e) => setEditingTitle(e.target.value)}
-                        onBlur={() => handleRename(conv.id)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') handleRename(conv.id);
-                        }}
-                        autoFocus
-                        className="bg-gray-800 text-white w-full rounded px-2 py-1"
-                      />
-                    ) : (
-                      <span className="truncate">{conv.title}</span>
-                    )}
-                  </button>
-                  <div className="relative conversation-menu">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setOpenMenuId(openMenuId === conv.id ? null : conv.id);
-                      }}
-                      className="p-1 rounded-full hover:bg-gray-700 text-gray-400 hover:text-white transition-colors"
-                    >
-                      <MoreVertical size={14} />
-                    </button>
-                    {openMenuId === conv.id && (
-                      <div className="absolute right-0 mt-1 w-48 bg-gray-800 rounded-lg shadow-lg py-1 z-10">
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setEditingTitle(conv.title);
-                            setEditingConvId(conv.id);
-                            setOpenMenuId(null);
-                          }}
-                          className="w-full px-4 py-2 text-left text-sm text-gray-300 hover:bg-gray-700 flex items-center space-x-2"
-                        >
-                          <Pencil size={14} />
-                          <span>Rename</span>
-                        </button>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleDeleteConversation(conv.id);
-                            setOpenMenuId(null);
-                          }}
-                          className="w-full px-4 py-2 text-left text-sm text-red-400 hover:bg-gray-700 flex items-center space-x-2"
-                        >
-                          <Trash2 size={14} />
-                          <span>Delete</span>
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-            <button
-              onClick={handleNewConversation}
-              className="mt-4 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg"
-            >
-              + New Conversation
-            </button>
-          </div>
-
-          <div className="flex flex-col flex-1 h-full">
-            <div className="flex justify-between items-center p-4 border-b bg-white">
-              <div className="flex items-center space-x-4">
-                <button
-                  onClick={() => setShowPersonalitySelector(true)}
-                  className="flex items-center space-x-2 px-3 py-2 rounded-lg hover:bg-gray-100 text-gray-700"
-                >
-                  <span className="text-sm font-medium">AI Personality</span>
-                  <span className="text-xs text-gray-500">({currentPersonality})</span>
-                </button>
-                <button
-                  onClick={() => setShowCategorySelector(true)}
-                  className="flex items-center space-x-2 px-3 py-2 rounded-lg hover:bg-gray-100 text-gray-700"
-                >
-                  <span className="text-sm font-medium">Category</span>
-                  <span className="text-xs text-gray-500">({currentCategory})</span>
-                </button>
-              </div>
-            </div>
-            <div className="flex-1 overflow-y-auto p-4 space-y-4">
-              {messages.map((message, index) => (
-                <div
-                  key={index}
-                  className={`flex ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}
-                >
-                  <div
-                    className={`max-w-[70%] rounded-lg p-3 ${
-                      message.type === 'user'
-                        ? 'bg-indigo-600 text-white rounded-br-none'
-                        : 'bg-white text-gray-800 rounded-bl-none shadow-md'
-                    }`}
-                  >
-                    {message.content}
-                    <MessageReaction
-                      messageId={index}
-                      reactions={messageReactions[index] || []}
-                      onReact={handleMessageReaction}
-                      messageContent={message.content}
-                    />
-                  </div>
-                </div>
-              ))}
-              <div ref={messagesEndRef} />
-            </div>
-
-            <div className="border-t border-gray-200 p-6 bg-white flex justify-center">
-              <div className="p-4 bg-white border-b border-gray-300">
-                <DocumentUpload onDocumentParsed={setDocText} />
-              </div>
-              <div className="flex items-center space-x-4 w-full max-w-xl">
-                <textarea
-                  value={newMessage}
-                  onChange={(e) => setNewMessage(e.target.value)}
-                  onKeyDown={handleKeyPress}
-                  placeholder={isSending ? "Waiting for response..." : "Type your message here..."}
-                  className={`flex-1 p-3 border border-gray-300 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-400 min-h-[44px] max-h-40 overflow-y-auto resize-none ${
-                    isSending ? 'bg-gray-50 cursor-not-allowed' : ''
-                  }`}
-                  rows={1}
-                  disabled={isSending}
-                />
-                <button
-                  onClick={handleSendMessage}
-                  disabled={isSending || !newMessage.trim()}
-                  className={`flex items-center justify-center bg-indigo-600 text-white px-6 py-3 rounded-full transition-colors ${
-                    isSending || !newMessage.trim() 
-                      ? 'opacity-50 cursor-not-allowed' 
-                      : 'hover:bg-indigo-700'
-                  }`}
-                >
-                  {isSending ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : (
-                    <Send className="w-5 h-5" />
-                  )}
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* Modals */}
-          {showDocumentPreview && (
-            <DocumentPreview
-              content={previewContent}
-              filename={previewFilename}
-              onClose={() => setShowDocumentPreview(false)}
-            />
-          )}
-
-          {showPersonalitySelector && (
-            <AIPersonalitySelector
-              currentPersonality={currentPersonality}
-              onSelect={handlePersonalitySelect}
-            />
-          )}
-
-          {showCategorySelector && (
-            <CategorySelector
-              currentCategory={currentCategory}
-              onSelect={handleCategorySelect}
-            />
-          )}
-        </>
-      )}
+    <div className="flex h-screen bg-white">
+      <ConversationSidebar
+        conversations={history.map(conv => ({
+          id: conv.id,
+          name: conv.title
+        }))}
+        activeConversation={activeConversation}
+        onSelectConversation={(conv) => handleConversationSelect(conv.id)}
+        onNewConversation={handleNewConversation}
+        onRenameConversation={handleRename}
+        onDeleteConversation={handleDeleteConversation}
+      />
+      <div className="flex-1 flex flex-col">
+        <ChatHeader
+          currentPersonality={currentPersonality}
+          currentCategory={currentCategory}
+          onPersonalitySelect={handlePersonalitySelect}
+          onCategorySelect={handleCategorySelect}
+        />
+        <OfflineBanner isOffline={isOffline} queueLength={queueLength} error={error} />
+        <ChatMessages
+          messages={messages}
+          messageReactions={messageReactions}
+          onReaction={handleMessageReaction}
+          messagesEndRef={messagesEndRef}
+        />
+        <ChatInput
+          value={newMessage}
+          onChange={setNewMessage}
+          onSend={handleSendMessage}
+          onKeyPress={handleKeyPress}
+          isSending={isSending}
+          onDocumentParsed={setDocText}
+        />
+        {showDocumentPreview && (
+          <DocumentPreview
+            content={previewContent}
+            filename={previewFilename}
+            onClose={() => setShowDocumentPreview(false)}
+          />
+        )}
+        {showPersonalitySelector && (
+          <AIPersonalitySelector
+            currentPersonality={currentPersonality}
+            onSelect={handlePersonalitySelect}
+            onClose={() => setShowPersonalitySelector(false)}
+          />
+        )}
+        {showCategorySelector && (
+          <CategorySelector
+            currentCategory={currentCategory}
+            onSelect={handleCategorySelect}
+            onClose={() => setShowCategorySelector(false)}
+          />
+        )}
+      </div>
     </div>
   );
 };
