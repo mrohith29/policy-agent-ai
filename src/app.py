@@ -1,7 +1,7 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, UUID4
+from pydantic import BaseModel, UUID4, validator
 from dotenv import load_dotenv
 from typing import List, Optional
 import shutil
@@ -12,27 +12,86 @@ from supabase import create_client
 from .parsers import parse_file
 import logging
 import json
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+import time
+from datetime import datetime
+import re
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('app.log'),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
 
 load_dotenv()
 
 app = FastAPI()
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+# CORS configuration for production
+allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Request validation middleware
+@app.middleware("http")
+async def validate_request(request: Request, call_next):
+    start_time = time.time()
+    try:
+        # Log request
+        logger.info(f"Request: {request.method} {request.url}")
+        
+        # Validate content type for POST/PUT requests
+        if request.method in ["POST", "PUT"]:
+            content_type = request.headers.get("content-type", "")
+            if not content_type.startswith("application/json"):
+                raise HTTPException(status_code=400, detail="Invalid content type")
+        
+        response = await call_next(request)
+        
+        # Log response time
+        process_time = time.time() - start_time
+        logger.info(f"Response time: {process_time:.2f}s")
+        
+        return response
+    except Exception as e:
+        logger.error(f"Error processing request: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Internal server error"}
+        )
+
 class MessageIn(BaseModel):
     user_id: str
     conversation_id: UUID4
-    messages: List[dict]
+    messages: List[dict] # This list now contains user and AI messages
+    email: Optional[str] = None  # Accept email from frontend if provided
+
+    @validator('messages')
+    def validate_messages(cls, v):
+        if not v:
+            raise ValueError('Messages cannot be empty')
+        # Allow 'system' type for client-side error messages
+        for msg in v:
+            if 'sender' not in msg or 'content' not in msg:
+                raise ValueError('Each message must have sender and content')
+            if msg['sender'] not in ['user', 'ai', 'system']:
+                raise ValueError('Message sender must be user, ai, or system')
+        return v
 
 class NewConversation(BaseModel):
     user_id: str
@@ -67,6 +126,8 @@ You're a helpful assistant specialized in understanding and explaining documents
 Please maintain a humble and friendly tone. If a question is out of scope or unclear, kindly ask for clarification or explain politely why it's difficult to answer.
 """
 
+FREE_USER_AI_MESSAGE_LIMIT = 10 # Define the limit here as well
+
 def validate_uuid(uuid_str: str) -> bool:
     try:
         uuid.UUID(str(uuid_str))
@@ -79,55 +140,142 @@ def serialize_response(data):
     return json.loads(json.dumps(data, cls=UUIDEncoder))
 
 @app.post("/ask")
-async def ask_question(query: MessageIn):
+@limiter.limit("10/minute")
+async def ask_question(request: Request, query: MessageIn):
     try:
         if not validate_uuid(query.conversation_id):
             raise HTTPException(status_code=400, detail="Invalid conversation ID format")
 
-        user_message = query.messages[-1]['content']
-        history = [{"role": "user" if m["type"] == "user" else "model", "parts": [m["content"]]} for m in query.messages]
-
-        chat = model.start_chat(history=history[:-1])
-        response = chat.send_message(SYSTEM_PROMPT + "\nUser Query: " + user_message)
-        answer = response.text.strip()
+        logger.info(f"Processing question for user {query.user_id} in conversation {query.conversation_id}")
 
         supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
-        # Convert UUID to string before inserting
-        conversation_id_str = str(query.conversation_id)
-        supabase.table("messages").insert([
-            {"conversation_id": conversation_id_str, "sender": "user", "content": user_message},
-            {"conversation_id": conversation_id_str, "sender": "ai", "content": answer},
-        ]).execute()
+        # 1. Fetch user profile to check membership status
+        try:
+            user_profile_response = supabase.table("users").select("membership_status").eq("id", query.user_id).single().execute()
+            logger.info(f"user_profile_response: {user_profile_response}")
+            user_membership_status = user_profile_response.data['membership_status']
+        except Exception as e:
+            logger.error(f"User profile not found or error fetching for user {query.user_id}: {e}")
+            raise HTTPException(status_code=404, detail="User profile not found or database error.")
+        
+        is_premium_user = user_membership_status == 'premium'
 
-        return serialize_response({"answer": answer})
+        # 2. Count existing AI messages for the conversation
+        ai_messages_count_response = supabase.table("messages").select("id").eq("conversation_id", str(query.conversation_id)).eq("sender", "ai").execute()
+        if ai_messages_count_response.data is None:
+            logger.error("Error counting AI messages: No data returned from Supabase.")
+            raise HTTPException(status_code=500, detail="Failed to count AI messages.")
+        current_ai_messages_count = len(ai_messages_count_response.data)
 
+        # 3. Enforce AI message limit for free users
+        if not is_premium_user and current_ai_messages_count >= FREE_USER_AI_MESSAGE_LIMIT:
+            raise HTTPException(
+                status_code=403,
+                detail=f"As a free user, you are limited to {FREE_USER_AI_MESSAGE_LIMIT} AI messages per conversation. Please upgrade to premium."
+            )
+
+        # Prepare chat history for the AI model
+        # Frontend sends all messages, so reconstruct history for model
+        user_message_content = query.messages[-1]['content']
+        history_for_gemini = []
+        for msg in query.messages[:-1]: # Exclude the current user message, which will be sent separately
+            if msg['sender'] == 'user':
+                history_for_gemini.append({"role": "user", "parts": [msg["content"]]})
+            elif msg['sender'] == 'ai':
+                history_for_gemini.append({"role": "model", "parts": [msg["content"]]})
+
+        chat = model.start_chat(history=history_for_gemini)
+        response = chat.send_message(SYSTEM_PROMPT + "\nUser Query: " + user_message_content)
+        ai_answer = response.text.strip()
+
+        logger.info(f"Successfully generated AI response for user {query.user_id}")
+
+        # 4. Insert only the AI message into the DB (user message is inserted by frontend)
+        ai_message_data = {
+            "conversation_id": str(query.conversation_id),
+            "sender": "ai",
+            "content": ai_answer,
+            "content_type": "text", # Default to text, can be expanded
+            "context": {}, # Placeholder, can be populated with RAG context etc.
+            "metadata": {"model_used": "gemini-1.5-flash", "timestamp": datetime.now().isoformat()} # Example metadata
+        }
+        insert_ai_response = supabase.table("messages").insert([ai_message_data]).execute()
+        if insert_ai_response.data is None:
+            logger.error("Error inserting AI message: No data returned from Supabase.")
+            raise HTTPException(status_code=500, detail="Failed to save AI message.")
+
+        # 5. Update conversation's updated_at and summary
+        # A more sophisticated summary can be generated by another AI call if needed
+        update_conversation_response = supabase.table("conversations").update({
+            "updated_at": datetime.now().isoformat(),
+            "summary": ai_answer[:100] + "..." if len(ai_answer) > 100 else ai_answer # Simple summary
+        }).eq("id", str(query.conversation_id)).execute()
+
+        if update_conversation_response.data is None:
+            logger.warning(f"Failed to update conversation summary/timestamp: No data returned from Supabase.")
+
+        return serialize_response({"answer": ai_answer})
+
+    except HTTPException as he:
+        logger.warning(f"HTTPException in ask_question: {he.detail} (Status: {he.status_code})")
+        return JSONResponse(status_code=he.status_code, content={"error": he.detail})
     except Exception as e:
-        logger.error(f"Error in ask_question: {str(e)}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        logger.error(f"Unhandled error in ask_question: {str(e)}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": "An unexpected error occurred."})
 
 @app.get("/conversations/{user_id}")
 async def get_conversations(user_id: str):
     try:
         supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-        response = supabase.table("conversations").select("*").eq("user_id", user_id).order("created_at").execute()
-        return serialize_response(response.data)
+        # Select all relevant fields from the new conversations schema
+        response = supabase.table("conversations").select("id, title, created_at, updated_at, summary, metadata").eq("user_id", user_id).order("created_at").execute()
+        
+        if response.error:
+            logger.error(f"Error fetching conversations from DB: {response.error.message}")
+            raise HTTPException(status_code=500, detail=f"Database error: {response.error.message}")
+
+        conversations_data = response.data
+
+        return serialize_response(conversations_data)
     except Exception as e:
-        logger.error(f"Error fetching conversations: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error fetching conversations: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An unexpected error occurred while fetching conversations.")
 
 @app.get("/messages/{conversation_id}")
 async def get_messages(conversation_id: str):
-    if not validate_uuid(conversation_id):
-        raise HTTPException(status_code=400, detail="Invalid conversation ID format")
-    
     try:
+        if not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', conversation_id):
+            raise HTTPException(status_code=400, detail="Invalid conversation ID format")
+
         supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-        response = supabase.table("messages").select("*").eq("conversation_id", conversation_id).order("created_at").execute()
-        return serialize_response(response.data)
+        
+        # Select all relevant fields from the new messages schema
+        response = supabase.table('messages') \
+            .select('id, conversation_id, sender, content, created_at, content_type, context, metadata') \
+            .eq('conversation_id', conversation_id) \
+            .order('created_at', desc=True) \
+            .execute()
+
+        if response.error:
+            logger.error(f"Error fetching messages from DB: {response.error.message}")
+            raise HTTPException(status_code=500, detail=f"Database error: {response.error.message}")
+
+        messages_data = response.data
+
+        # Reverse the order to get chronological order
+        messages = messages_data[::-1]
+        
+        return {
+            "messages": messages,
+            "total": len(messages)
+        }
+
+    except HTTPException as he:
+        raise he
     except Exception as e:
-        logger.error(f"Error fetching messages: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error fetching messages: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An unexpected error occurred while fetching messages.")
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
@@ -150,54 +298,58 @@ async def upload_file(file: UploadFile = File(...)):
 async def create_conversation(conv: NewConversation):
     try:
         supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-        conversation_id = uuid.uuid4()
-        response = supabase.table("conversations").insert({
-            "id": str(conversation_id),  # Convert UUID to string
-            "user_id": conv.user_id,
-            "title": conv.title
-        }).execute()
-        
-        if response.data:
-            return serialize_response({"id": response.data[0]["id"]})
-        raise HTTPException(status_code=500, detail="Failed to create conversation")
+        # Note: Frontend now handles initial conversation creation directly to DB
+        # This endpoint might be used for other server-side initiated conversations.
+        # Ensure it aligns with the new schema fields.
+        try:
+            response = supabase.table("conversations").insert({
+                "user_id": conv.user_id,
+                "title": conv.title,
+                "created_at": datetime.now().isoformat(),
+                "updated_at": datetime.now().isoformat()
+            }).select("id").single().execute() # Select id to return
+            
+            # Access data directly from the response object
+            conversation_data = response['data']
+
+            return serialize_response({"id": conversation_data['id']})
+        except Exception as e:
+            logger.error(f"Error creating conversation: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Failed to create conversation: {str(e)}")
     except Exception as e:
-        logger.error(f"Error creating conversation: {str(e)}")
+        logger.error(f"Error creating conversation: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.put("/conversations/{conversation_id}")
 async def rename_conversation(conversation_id: str, body: RenameConversation):
-    if not validate_uuid(conversation_id):
-        raise HTTPException(status_code=400, detail="Invalid conversation ID format")
-    
     try:
         supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-        response = supabase.table("conversations").update({"title": body.title}).eq("id", conversation_id).execute()
-        if response.data:
-            return serialize_response({"status": "success"})
-        raise HTTPException(status_code=500, detail="Failed to rename conversation")
+        # Frontend now handles rename directly to DB, but this can be a fallback or for server-side rename
+        supabase.table("conversations").update({
+            "title": body.title,
+            "updated_at": datetime.now().isoformat()
+        }).eq("id", conversation_id).execute()
+        
+        return JSONResponse(status_code=200, content={"message": "Conversation renamed successfully"})
     except Exception as e:
-        logger.error(f"Error renaming conversation: {str(e)}")
+        logger.error(f"Error renaming conversation: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/conversations/{conversation_id}")
-async def delete_conversation(conversation_id: str):
-    if not validate_uuid(conversation_id):
-        raise HTTPException(status_code=400, detail="Invalid conversation ID format")
-    
+async def delete_conversation(conversation_id: str, request: Request):
     try:
+        # Assuming user_id can be passed in headers for authentication/authorization
+        # For RLS, Supabase handles it if policies are set.
+        # If not using RLS on backend, you'd need a user_id from token/header.
+        # For now, relying on potential RLS for security in Supabase. User_id check removed
+        # from backend as frontend already enforces it for deletion and Supabase RLS is best.
         supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
         
-        # First delete all messages in the conversation
-        supabase.table("messages").delete().eq("conversation_id", conversation_id).execute()
+        supabase.table("conversations").delete().eq("id", conversation_id).execute()
         
-        # Then delete the conversation itself
-        response = supabase.table("conversations").delete().eq("id", conversation_id).execute()
-        
-        if response.data:
-            return serialize_response({"status": "success", "message": "Conversation deleted successfully"})
-        raise HTTPException(status_code=404, detail="Conversation not found")
+        return JSONResponse(status_code=200, content={"message": "Conversation deleted successfully"})
     except Exception as e:
-        logger.error(f"Error deleting conversation: {str(e)}")
+        logger.error(f"Error deleting conversation: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":

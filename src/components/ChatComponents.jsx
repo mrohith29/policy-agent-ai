@@ -21,7 +21,8 @@ const DocumentPreview = ({ content, filename, onClose }) => {
 };
 
 // Message Reaction Component
-const MessageReaction = ({ messageId, reactions = [], onReact, messageContent }) => {
+const MessageReaction = ({ messageId, reactions, onReact, messageContent }) => {
+  const safeReactions = Array.isArray(reactions) ? reactions : [];
   const reactionTypes = [
     { 
       icon: <ThumbsUp size={16} />, 
@@ -83,14 +84,14 @@ const MessageReaction = ({ messageId, reactions = [], onReact, messageContent })
   return (
     <div className="flex items-center space-x-1 mt-2">
       {reactionTypes.map(({ icon, type, tooltip }) => {
-        const count = reactions.filter(r => r === type).length;
+        const count = safeReactions.filter(r => r === type).length;
         return (
           <button
             key={type}
             onClick={() => handleReaction(type)}
             title={tooltip}
             className={`flex items-center space-x-1 px-2 py-1 rounded-full text-sm transition-colors ${
-              reactions.includes(type)
+              safeReactions.includes(type)
                 ? 'bg-indigo-100 text-indigo-600'
                 : 'hover:bg-gray-100 text-gray-500'
             }`}

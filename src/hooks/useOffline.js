@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
+import { supabase } from '../utils/supabase';
 import { 
   addToOfflineQueue, 
   processOfflineQueue, 
@@ -23,27 +24,7 @@ export const useOffline = (activeConversation) => {
   const [queueLength, setQueueLength] = useState(0);
   const [error, setError] = useState(null);
 
-  useEffect(() => {
-    const handleOnline = () => {
-      setIsOffline(false);
-      setError(null);
-      processOfflineMessages();
-    };
-    const handleOffline = () => {
-      setIsOffline(true);
-      setError('You are offline. Messages will be queued for sending when you are back online.');
-    };
-
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-
-    return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-    };
-  }, [activeConversation]);
-
-  const processOfflineMessages = async () => {
+  const processOfflineMessages = useCallback(async () => {
     if (!isOffline) {
       try {
         const { processed, failed } = await processOfflineQueue(async (message) => {
@@ -93,7 +74,34 @@ export const useOffline = (activeConversation) => {
         setError('Error processing offline messages. Please try again.');
       }
     }
-  };
+  }, [isOffline]);
+
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOffline(false);
+      setError(null);
+      processOfflineMessages();
+    };
+    const handleOffline = () => {
+      setIsOffline(true);
+      setError('You are offline. Some functionality may be limited.');
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    // Initial check
+    if (navigator.onLine) {
+      handleOnline();
+    } else {
+      handleOffline();
+    }
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [processOfflineMessages]);
 
   const queueMessage = (messageData) => {
     const convId = ensureUUIDString(messageData.conversation_id);
@@ -113,48 +121,42 @@ export const useOffline = (activeConversation) => {
     setQueueLength(prev => prev + 1);
   };
 
-  const loadMessages = async (conversationId) => {
-    const convId = ensureUUIDString(conversationId);
-    if (!convId || !isValidUUID(convId)) {
-      setError('Invalid conversation ID format');
+  const loadMessages = useCallback(async (conversationId) => {
+    if (!conversationId) {
+      console.warn("loadMessages called with no conversationId");
       return [];
     }
-
+  
     try {
-      // Try to load from server first
-      const res = await fetch(`http://localhost:8000/messages/${convId}`);
-      if (res.ok) {
-        const data = await res.json();
-        if (!Array.isArray(data)) {
-          throw new Error('Invalid response format from server');
+      if (navigator.onLine) {
+        // Try to load from server first
+        const { data, error } = await supabase
+          .from('messages')
+          .select('id, conversation_id, sender, content, created_at, content_type, context, metadata')
+          .eq('conversation_id', conversationId)
+          .order('created_at', { ascending: true });
+  
+        if (error) {
+          throw new Error(`Supabase error: ${error.message}`);
         }
-        
-        const formatted = data.map(msg => ({
-          type: msg.sender === 'user' ? 'user' : 'ai',
-          content: msg.content,
-          timestamp: msg.timestamp || new Date().toISOString()
-        }));
-        
-        // Save to offline storage
-        saveMessages(convId, formatted);
-        return formatted;
+  
+        // Save to offline storage for future offline access
+        await saveMessages(conversationId, data);
+        return data;
       } else {
-        const errorData = await res.json();
-        throw new Error(errorData.detail || 'Failed to load messages');
+        // If offline, load directly from local storage
+        const offlineMessages = await loadOfflineMessages(conversationId);
+        return offlineMessages || [];
       }
     } catch (error) {
-      console.error('Error loading messages from server:', error);
-      setError('Error loading messages. Loading from offline storage...');
+      console.error('Error loading messages:', error);
+      setError(`Failed to load messages. Displaying offline data if available.`);
       
-      // If server fails or network error, try to load from offline storage
-      const offlineMessages = loadOfflineMessages(convId);
-      if (!Array.isArray(offlineMessages)) {
-        console.error('Invalid offline messages format:', offlineMessages);
-        return [];
-      }
-      return offlineMessages;
+      // If server fails or there's any other error, fall back to offline storage
+      const offlineMessages = await loadOfflineMessages(conversationId);
+      return offlineMessages || [];
     }
-  };
+  }, []);
 
   return {
     isOffline,

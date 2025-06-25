@@ -5,11 +5,12 @@ import {
   Trash2, 
   Edit2, 
   Check, 
-  X 
+  X, 
+  Crown
 } from 'lucide-react';
 import { deleteOfflineConversation } from '../utils/offlineUtils';
 
-// Helper function to ensure UUID is string
+// Helper function to ensure UUID is string (might be redundant if IDs are always strings from DB)
 const ensureUUIDString = (uuid) => {
   if (!uuid) return null;
   try {
@@ -24,32 +25,39 @@ const ensureUUIDString = (uuid) => {
   }
 };
 
-const ConversationSidebar = ({ 
-  conversations = [], 
-  activeConversation = null, 
-  onSelectConversation = () => {}, 
-  onNewConversation = () => {},
+const ConversationSidebar = ({
+  conversations = [],
+  activeConversationId = null, // Renamed from activeConversation
+  onSelectConversation = () => {},
+  onCreateNewConversation = () => {}, // Renamed from onNewConversation
   onRenameConversation = () => {},
-  onDeleteConversation = () => {}
+  onDeleteConversation = () => {},
+  editingConvId,
+  setEditingConvId,
+  editingTitle,
+  setEditingTitle,
+  openMenuId,
+  setOpenMenuId,
+  isNewConversation, // Prop from Chat.jsx
+  setIsNewConversation, // Prop from Chat.jsx
+  userProfile // New prop for user membership info
 }) => {
-  const [editingId, setEditingId] = useState(null);
-  const [editName, setEditName] = useState('');
 
   const handleRename = (conversation) => {
     if (!conversation) return;
-    setEditingId(conversation.id);
-    setEditName(conversation.name || '');
+    setEditingConvId(conversation.id);
+    setEditingTitle(conversation.title || ''); // Use conversation.title
   };
 
   const handleSaveRename = async () => {
-    if (editName.trim()) {
-      const conversationId = ensureUUIDString(editingId);
+    if (editingTitle.trim()) {
+      const conversationId = ensureUUIDString(editingConvId);
       if (conversationId) {
-        await onRenameConversation(conversationId, editName.trim());
+        await onRenameConversation(conversationId, editingTitle.trim());
       }
     }
-    setEditingId(null);
-    setEditName('');
+    setEditingConvId(null);
+    setEditingTitle('');
   };
 
   const handleKeyDown = (e) => {
@@ -58,8 +66,8 @@ const ConversationSidebar = ({
       handleSaveRename();
     } else if (e.key === 'Escape') {
       e.preventDefault();
-      setEditingId(null);
-      setEditName('');
+      setEditingConvId(null);
+      setEditingTitle('');
     }
   };
 
@@ -68,93 +76,117 @@ const ConversationSidebar = ({
     const conversationId = ensureUUIDString(conversation.id);
     if (conversationId) {
       await onDeleteConversation(conversationId);
+      // Assuming deleteOfflineConversation is still relevant for local cache
       await deleteOfflineConversation(conversationId);
     }
   };
 
+  const handleConversationClick = (conversation) => {
+    onSelectConversation(conversation);
+  };
+
+  const isPremiumUser = userProfile?.membership_status === 'premium';
+
   return (
     <div className="w-64 bg-gray-50 border-r border-gray-200 h-full flex flex-col">
-      <div className="p-4">
+      <div className="p-4 flex items-center justify-between">
         <button
-          onClick={onNewConversation}
-          className="w-full flex items-center justify-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors"
+          onClick={onCreateNewConversation} // Use new prop name
+          className="flex-1 bg-indigo-600 text-white p-2 rounded-lg hover:bg-indigo-700 transition-colors flex items-center justify-center gap-2"
         >
-          <Plus size={20} />
-          New Conversation
+          <Plus size={18} />
+          New Chat
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto">
-        {Array.isArray(conversations) && conversations.map((conversation) => {
-          if (!conversation) return null;
-          
-          const conversationId = ensureUUIDString(conversation.id);
-          const isActive = conversationId === ensureUUIDString(activeConversation?.id);
-          
-          return (
-            <div
-              key={conversationId || Math.random()}
-              className={`p-4 border-b border-gray-200 hover:bg-gray-100 cursor-pointer ${
-                isActive ? 'bg-blue-50' : ''
-              }`}
-            >
-              {editingId === conversationId ? (
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    id="conversation-rename"
-                    name="conversation-rename"
-                    value={editName}
-                    onChange={(e) => setEditName(e.target.value)}
-                    onKeyDown={handleKeyDown}
-                    className="flex-1 px-2 py-1 border rounded"
-                    autoFocus
-                  />
+      <div className="flex-1 overflow-y-auto p-2 space-y-2">
+        {conversations.length === 0 && (
+          <p className="text-center text-gray-500 text-sm mt-4">No conversations yet. Start a new one!</p>
+        )}
+
+        {conversations.map((conversation) => (
+          <div
+            key={conversation.id}
+            className={`conversation-card p-3 rounded-lg cursor-pointer transition-colors group relative ${
+              activeConversationId === conversation.id ? 'active bg-indigo-100' : 'hover:bg-gray-100'
+            }`}
+            onClick={() => handleConversationClick(conversation)}
+          >
+            {editingConvId === conversation.id ? (
+              <div className="flex items-center space-x-2">
+                <input
+                  type="text"
+                  value={editingTitle}
+                  onChange={(e) => setEditingTitle(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  className="flex-1 p-1 border rounded focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  autoFocus
+                />
+                <button
+                  onClick={handleSaveRename}
+                  className="p-1 text-green-600 hover:text-green-700"
+                >
+                  <Check size={16} />
+                </button>
+                <button
+                  onClick={() => { setEditingConvId(null); setEditingTitle(''); }} // Cancel edit
+                  className="p-1 text-gray-500 hover:text-gray-700"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+            ) : (
+              <div 
+                className="flex items-center justify-between"
+              >
+                <div className="flex items-center gap-2 flex-1 truncate">
+                  <MessageSquare size={16} className="text-gray-500" />
+                  <span className="truncate font-medium text-gray-800">{conversation.title || 'Untitled Conversation'}</span>
+                </div>
+                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                   <button
-                    onClick={handleSaveRename}
-                    className="p-1 text-green-600 hover:text-green-700"
+                    onClick={(e) => { e.stopPropagation(); handleRename(conversation); }}
+                    className="p-1 text-gray-500 hover:text-gray-700 rounded-md hover:bg-gray-200"
+                    title="Rename Conversation"
                   >
-                    <Check size={16} />
+                    <Edit2 size={16} />
                   </button>
                   <button
-                    onClick={() => {
-                      setEditingId(null);
-                      setEditName('');
-                    }}
-                    className="p-1 text-red-600 hover:text-red-700"
+                    onClick={(e) => { e.stopPropagation(); handleDelete(conversation); }}
+                    className="p-1 text-gray-500 hover:text-red-600 rounded-md hover:bg-gray-200"
+                    title="Delete Conversation"
                   >
-                    <X size={16} />
+                    <Trash2 size={16} />
                   </button>
                 </div>
-              ) : (
-                <div className="flex items-center justify-between">
-                  <div
-                    className="flex items-center gap-2 flex-1"
-                    onClick={() => onSelectConversation(conversation)}
-                  >
-                    <MessageSquare size={16} className="text-gray-500" />
-                    <span className="truncate">{conversation.name || 'Untitled'}</span>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <button
-                      onClick={() => handleRename(conversation)}
-                      className="p-1 text-gray-500 hover:text-gray-700"
-                    >
-                      <Edit2 size={16} />
-                    </button>
-                    <button
-                      onClick={() => handleDelete(conversation)}
-                      className="p-1 text-gray-500 hover:text-red-600"
-                    >
-                      <Trash2 size={16} />
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          );
-        })}
+              </div>
+            )}
+          </div>
+        ))}
       </div>
+      
+      {userProfile && (
+        <div className="p-4 border-t border-gray-200 bg-white flex flex-col gap-2 text-sm text-gray-700">
+          <div className="flex items-center gap-2">
+            {isPremiumUser ? (
+              <Crown size={16} className="text-yellow-500" />
+            ) : (
+              <MessageSquare size={16} className="text-gray-500" />
+            )}
+            <span>{userProfile.email}</span>
+          </div>
+          <div className="font-semibold">
+            {isPremiumUser ? (
+              <span className="text-green-600">Premium User</span>
+            ) : (
+              <span className="text-blue-600">Free User</span>
+            )}
+          </div>
+          {userProfile.premium_end_date && (
+            <p className="text-xs text-gray-500">Premium ends: {new Date(userProfile.premium_end_date).toLocaleDateString()}</p>
+          )}
+        </div>
+      )}
     </div>
   );
 };

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useContext } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { supabase } from '../utils/supabase';
 import { MoreVertical, Send, Loader2, Trash2, Pencil, WifiOff } from 'lucide-react';
@@ -8,8 +8,14 @@ import ChatHeader from '../components/ChatHeader';
 import ChatMessages from '../components/ChatMessages';
 import ChatInput from '../components/ChatInput';
 import OfflineBanner from '../components/OfflineBanner';
+import Button from '../components/Button';
 import { useOffline } from '../hooks/useOffline';
 import { saveMessages } from '../utils/offlineUtils';
+import { useNotification } from '../contexts/NotificationContext';
+import { UserContext } from '../contexts/UserContext';
+
+const FREE_USER_CONVERSATION_LIMIT = 1;
+const FREE_USER_AI_MESSAGE_LIMIT = 10;
 
 const Chat = () => {
   const location = useLocation();
@@ -27,7 +33,9 @@ const Chat = () => {
   const [editingTitle, setEditingTitle] = useState('');
   const [openMenuId, setOpenMenuId] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
-  
+  const [isLoadingMessages, setIsLoadingMessages] = useState(false);
+  const [isNewConversation, setIsNewConversation] = useState(false);
+
   // New state variables for chat components
   const [showDocumentPreview, setShowDocumentPreview] = useState(false);
   const [previewContent, setPreviewContent] = useState('');
@@ -38,61 +46,78 @@ const Chat = () => {
   const [currentCategory, setCurrentCategory] = useState('general');
   const [messageReactions, setMessageReactions] = useState({});
   const [isSending, setIsSending] = useState(false);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(true);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const MESSAGES_PER_PAGE = 20;
 
+  const { showSuccess, showError, showInfo } = useNotification();
+  const { userProfile, userLoading, isPremium } = useContext(UserContext);
   const { isOffline, queueLength, error, queueMessage, loadMessages: loadMessagesWithOffline } = useOffline(activeConversation);
+
+  const handleConversationSelect = useCallback(async (conversation) => {
+    if (!conversation || !conversation.id) {
+      showError('Invalid conversation selected');
+      return;
+    }
+    
+    setIsLoadingMessages(true);
+    setActiveConversation(conversation.id);
+    setIsNewConversation(false);
+    navigate(`/chat/${conversation.id}`);
+    const loadedMessages = await loadMessagesWithOffline(conversation.id);
+    setMessages(loadedMessages);
+    setIsLoadingMessages(false);
+  }, [navigate, loadMessagesWithOffline, showError, setMessages]);
 
   useEffect(() => {
     const checkSessionAndLoad = async () => {
-      setIsLoading(true);
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) {
+      if (userLoading) return;
+      if (!userProfile) {
         navigate('/login', { replace: true });
         return;
       }
 
-      const user_id = session.user.id;
+      const user_id = userProfile.id;
 
       try {
-        const res = await fetch(`http://localhost:8000/conversations/${user_id}`);
-        if (!res.ok) {
-          throw new Error('Failed to fetch conversations');
-        }
-        const conversations = await res.json();
+        const { data: conversations, error } = await supabase
+          .from('conversations')
+          .select('id, title, created_at, updated_at, summary, metadata')
+          .eq('user_id', user_id)
+          .order('created_at', { ascending: false });
+        
+        if (error) throw error;
 
-        if (conversations.length > 0) {
+        if (conversations && conversations.length > 0) {
           setHistory(conversations);
           
           const targetConvId = conversationId || conversations[0].id;
-          setActiveConversation(targetConvId);
-          const loadedMessages = await loadMessagesWithOffline(targetConvId);
-          setMessages(loadedMessages);
+          
+          if (targetConvId && targetConvId !== 'new') {
+            setActiveConversation(targetConvId);
+            const loadedMessages = await loadMessagesWithOffline(targetConvId);
+            setMessages(loadedMessages);
+          } else {
+            setActiveConversation(null);
+            setIsNewConversation(true);
+            setMessages([]);
+          }
           
           if (!conversationId) {
             navigate(`/chat/${targetConvId}`, { replace: true });
           }
         } else {
-          const newConvRes = await fetch('http://localhost:8000/conversations', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ 
-              user_id, 
-              title: 'New Conversation' 
-            }),
-          });
-          
-          if (newConvRes.ok) {
-            const newConv = await newConvRes.json();
-            if (newConv?.id) {
-              setHistory([{ id: newConv.id, title: 'New Conversation' }]);
-              setActiveConversation(newConv.id);
-              navigate(`/chat/${newConv.id}`, { replace: true });
-              setMessages([]);
-            }
+          setIsNewConversation(true);
+          setMessages([]);
+          if (conversationId && conversationId !== 'new') {
+            navigate('/chat/new', { replace: true });
           }
         }
-      } catch (error) {
-        console.error('Error loading conversations:', error);
-        if (!session) {
+      } catch (err) {
+        console.error('Error loading conversations:', err);
+        showError(`Error loading conversations: ${err.message}`);
+        if (!userProfile) {
           navigate('/login', { replace: true });
         }
       } finally {
@@ -101,124 +126,226 @@ const Chat = () => {
     };
 
     checkSessionAndLoad();
-  }, [navigate, conversationId]);
+  }, [navigate, conversationId, userProfile, userLoading, loadMessagesWithOffline, showError]);
 
   const handleSendMessage = async () => {
-    if (newMessage.trim() === '' || isSending) return;
+    if (newMessage.trim() === '' || isSending || userLoading || !userProfile) return;
 
-    const newMsg = { type: 'user', content: newMessage };
-    const updatedMessages = [...messages, newMsg];
-    setMessages(updatedMessages);
-    setNewMessage('');
+    const currentUserId = userProfile.id;
+
+    // Free user conversation limit check
+    if (!isPremium && history.length >= FREE_USER_CONVERSATION_LIMIT && isNewConversation) {
+      showInfo(`As a free user, you are limited to ${FREE_USER_CONVERSATION_LIMIT} conversation. Please upgrade to premium to create more.`);
+      return;
+    }
+
+    // Free user AI message limit check
+    const aiMessagesCount = messages.filter(msg => msg.sender === 'ai').length;
+    if (!isPremium && aiMessagesCount >= FREE_USER_AI_MESSAGE_LIMIT) {
+      showInfo(`As a free user, you are limited to ${FREE_USER_AI_MESSAGE_LIMIT} AI messages per conversation. Please upgrade to premium.`);
+      return;
+    }
+
     setIsSending(true);
+    let currentConversationId = activeConversation;
+    const messageToSend = newMessage;
+    setNewMessage(''); // Clear input field immediately for better UX
+
+    // Optimistic UI update for user message
+    const tempUserMsgId = gen_random_uuid();
+    const newUserMsg = {
+      id: tempUserMsgId,
+      conversation_id: currentConversationId || 'new', // Use placeholder for new convos
+      sender: 'user',
+      content: messageToSend,
+      content_type: 'text',
+      created_at: new Date().toISOString(),
+    };
+    setMessages(prev => [...prev, newUserMsg]);
 
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      const user_id = session?.user?.id;
+      // 1. Create new conversation if it's a new chat
+      if (isNewConversation || !currentConversationId) {
+        const title = messageToSend.substring(0, 30) || `Conversation ${history.length + 1}`;
+        const { data: newConv, error } = await supabase
+          .from('conversations')
+          .insert([{ user_id: currentUserId, title }])
+          .select()
+          .single();
 
-      if (!user_id || !activeConversation) {
-        console.error("Missing user_id or activeConversation");
-        return;
+        if (error) {
+          throw new Error(`Failed to create new conversation: ${error.message}`);
+        }
+
+        currentConversationId = newConv.id;
+        setActiveConversation(newConv.id);
+        setHistory(prev => [newConv, ...prev]);
+        setIsNewConversation(false);
+        navigate(`/chat/${newConv.id}`, { replace: true });
+        showSuccess('New conversation created!');
+
+        // Update conversation_id for the optimistically added message
+        setMessages(prev => prev.map(msg =>
+          msg.id === tempUserMsgId ? { ...msg, conversation_id: currentConversationId } : msg
+        ));
       }
 
-      if (isOffline) {
-        const messageData = {
-          conversation_id: activeConversation,
-          messages: updatedMessages,
-          user_id,
-          timestamp: new Date().toISOString()
-        };
-        
-        queueMessage(messageData);
-        saveMessages(activeConversation, updatedMessages);
-        
-        setMessages(prev => [...prev, { 
-          type: 'ai', 
-          content: 'Message queued for sending when back online.' 
-        }]);
-        return;
+      // 2. Insert user message into Supabase
+      // The message is already added optimistically, now we just save it
+      const { data: insertedUserMsg, error: insertUserError } = await supabase
+        .from('messages')
+        .insert([{
+          conversation_id: currentConversationId,
+          sender: 'user', // Ensure sender is explicitly 'user'
+          content: messageToSend,
+          content_type: 'text',
+          created_at: newUserMsg.created_at,
+        }])
+        .select()
+        .single();
+      
+      if (insertUserError) {
+        throw new Error(`Failed to save message: ${insertUserError.message}`);
       }
+      
+      // Replace temporary user message with the actual message from DB for consistency
+      setMessages(prev => prev.map(msg => (msg.id === tempUserMsgId ? insertedUserMsg : msg)));
+
+      // 3. Call backend for AI response
+      const allMessagesForApi = messages.filter(m => m.id !== tempUserMsgId);
+      allMessagesForApi.push(insertedUserMsg);
 
       const res = await fetch('http://localhost:8000/ask', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          user_id,
-          conversation_id: activeConversation,
-          messages: updatedMessages,
+          user_id: currentUserId,
+          conversation_id: currentConversationId,
+          messages: allMessagesForApi.map(msg => ({ sender: msg.sender, content: msg.content })),
         }),
       });
 
+      if (!res.ok) {
+        const errorData = await res.json();
+        showError(errorData.error || 'Failed to get AI response.');
+        setIsSending(false);
+        return;
+      }
+
       const data = await res.json();
-      if (res.ok && data.answer) {
-        const finalMessages = [...updatedMessages, { type: 'ai', content: data.answer }];
-        setMessages(finalMessages);
-        saveMessages(activeConversation, finalMessages);
+      if (data.answer) {
+        setMessages(prev => [...prev, {
+          id: gen_random_uuid(),
+          conversation_id: currentConversationId,
+          sender: 'ai',
+          content: data.answer,
+          content_type: 'text',
+          context: data.context || {},
+          metadata: data.metadata || {},
+          created_at: new Date().toISOString(),
+        }]);
+
+        await supabase
+          .from('conversations')
+          .update({ updated_at: new Date().toISOString(), summary: data.summary || null })
+          .eq('id', currentConversationId);
+
+        setHistory(prevHistory => prevHistory.map(conv => 
+          conv.id === currentConversationId ? 
+          { ...conv, updated_at: new Date().toISOString(), summary: data.summary || conv.summary || null } : 
+          conv
+        ));
       } else {
-        setMessages(prev => [...prev, { type: 'ai', content: `Error: ${data.error}` }]);
+        throw new Error(data.error || 'Failed to get AI response.');
       }
     } catch (err) {
       console.error(err);
-      setMessages(prev => [...prev, { type: 'ai', content: 'Network error occurred.' }]);
+      showError(`Error: ${err.message}`);
+      // Mark optimistic message as failed
+      setMessages(prev => prev.map(msg => 
+        msg.id === tempUserMsgId ? { ...msg, error: true } : msg
+      ));
     } finally {
       setIsSending(false);
     }
   };
 
   const handleNewConversation = async () => {
-    const { data: { session } } = await supabase.auth.getSession();
-    const user_id = session.user.id;
-  
-    const title = `Conversation ${history.length + 1}`;
-  
-    const res = await fetch('http://localhost:8000/conversations', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user_id, title }),
-    });
-  
-    const newConv = await res.json();
-  
-    if (newConv?.id) {
-      const newConversation = { id: newConv.id, title };
-      setHistory(prev => [...prev, newConversation]);
-      setActiveConversation(newConv.id);
-      navigate(`/chat/${newConv.id}`);
-      setMessages([]);
+    if (userLoading || !userProfile) return;
+
+    const currentUserId = userProfile.id;
+
+    if (!isPremium && history.length >= FREE_USER_CONVERSATION_LIMIT) {
+      showInfo(`As a free user, you are limited to ${FREE_USER_CONVERSATION_LIMIT} conversation. Please upgrade to premium to create more.`); 
+      return;
     }
+
+    setActiveConversation(null);
+    setMessages([]);
+    setNewMessage('');
+    setIsNewConversation(true);
+    navigate('/chat/new');
+    showInfo('Ready to start a new conversation. Send your first message!');
   };
 
   const handleRename = async (convId, newTitle) => {
-    if (!convId || !newTitle.trim()) return;
+    if (!userProfile) return;
 
     try {
-      const res = await fetch(`http://localhost:8000/conversations/${convId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: newTitle }),
-      });
+      const { data, error } = await supabase
+        .from('conversations')
+        .update({ title: newTitle, updated_at: new Date().toISOString() })
+        .eq('id', convId)
+        .eq('user_id', userProfile.id);
 
-      if (!res.ok) {
-        throw new Error('Failed to rename conversation');
-      }
+      if (error) throw error;
 
-      // Update the conversation in the history
-      setHistory(prev => prev.map(conv => 
-        conv.id === convId ? { ...conv, title: newTitle } : conv
-      ));
-
-      // If this is the active conversation, update it as well
-      if (activeConversation === convId) {
-        setActiveConversation(prev => ({
-          ...prev,
-          title: newTitle
-        }));
-      }
+      setHistory(prev => prev.map(conv => conv.id === convId ? { ...conv, title: newTitle } : conv));
+      // No need to update activeConversation state here, title is derived from history
+      showSuccess('Conversation renamed successfully!');
+      setEditingConvId(null);
+      setEditingTitle('');
     } catch (error) {
       console.error('Error renaming conversation:', error);
-      // You might want to show an error message to the user here
+      showError(`Failed to rename conversation: ${error.message}`);
     }
   };
+
+  const handleDeleteConversation = async (convId) => {
+    if (!userProfile) return;
+
+    try {
+      const { error } = await supabase
+        .from('conversations')
+        .delete()
+        .eq('id', convId)
+        .eq('user_id', userProfile.id);
+
+      if (error) throw error;
+
+      setHistory(prev => prev.filter(conv => conv.id !== convId));
+      if (activeConversation === convId) {
+        setActiveConversation(null);
+        setMessages([]);
+        navigate('/chat/new');
+      }
+      showSuccess('Conversation deleted successfully!');
+    } catch (error) {
+      console.error('Error deleting conversation:', error);
+      showError(`Failed to delete conversation: ${error.message}`);
+    }
+  };
+
+  const gen_random_uuid = () => {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+      var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+      return v.toString(16);
+    });
+  };
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
 
   const handleKeyPress = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -227,13 +354,6 @@ const Chat = () => {
     }
   };
 
-  const handleConversationSelect = (convId) => {
-    setActiveConversation(convId);
-    loadMessagesWithOffline(convId);
-    navigate(`/chat/${convId}`);
-  };
-
-  // New handler functions for chat components
   const handleDocumentPreview = (content, filename) => {
     setPreviewContent(content);
     setPreviewFilename(filename);
@@ -242,158 +362,130 @@ const Chat = () => {
 
   const handlePersonalitySelect = (personalityId) => {
     setCurrentPersonality(personalityId);
-    setShowPersonalitySelector(false);
   };
 
   const handleCategorySelect = (categoryId) => {
     setCurrentCategory(categoryId);
-    setShowCategorySelector(false);
   };
 
   const handleMessageReaction = (messageId, reactionType) => {
-    setMessageReactions(prev => {
-      const messageReactions = prev[messageId] || [];
-      const hasReaction = messageReactions.includes(reactionType);
-      
-      return {
-        ...prev,
-        [messageId]: hasReaction
-          ? messageReactions.filter(r => r !== reactionType)
-          : [...messageReactions, reactionType]
-      };
-    });
+    setMessageReactions(prev => ({
+      ...prev,
+      [messageId]: reactionType === prev[messageId] ? null : reactionType
+    }));
   };
 
-  const handleDeleteConversation = async (convId) => {
-    if (!window.confirm('Are you sure you want to delete this conversation?')) {
-      return;
-    }
+  const loadMoreMessages = async () => {
+    if (!hasMore || isLoadingMore || !activeConversation) return;
 
+    setIsLoadingMore(true);
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) {
-        console.error("No active session");
-        return;
-      }
+      const { data, error } = await supabase
+        .from('messages')
+        .select('id, conversation_id, sender, content, created_at, content_type, context, metadata')
+        .eq('conversation_id', activeConversation)
+        .order('created_at', { ascending: true })
+        .range(page * MESSAGES_PER_PAGE, (page + 1) * MESSAGES_PER_PAGE - 1);
 
-      // Log the request details for debugging
-      console.log('Attempting to delete conversation:', convId);
-      console.log('User session:', session.user.id);
+      if (error) throw error;
 
-      const res = await fetch(`http://localhost:8000/conversations/${convId}`, {
-        method: 'DELETE',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session.access_token}`,
-          'user_id': session.user.id
-        }
-      });
-
-      // Log the response for debugging
-      console.log('Delete response status:', res.status);
-      const responseData = await res.json().catch(() => null);
-      console.log('Delete response data:', responseData);
-
-      if (res.ok) {
-        // Remove the conversation from history
-        setHistory(prev => prev.filter(conv => conv.id !== convId));
-        
-        // If the deleted conversation was active, switch to another one
-        if (activeConversation === convId) {
-          const remainingConversations = history.filter(conv => conv.id !== convId);
-          if (remainingConversations.length > 0) {
-            handleConversationSelect(remainingConversations[0].id);
-          } else {
-            handleNewConversation();
-          }
-        }
+      if (data.length > 0) {
+        setMessages(prevMessages => [...prevMessages, ...data]);
+        setPage(prevPage => prevPage + 1);
       } else {
-        const errorMessage = responseData?.detail || 'Failed to delete conversation';
-        console.error("Failed to delete conversation:", errorMessage);
-        alert(`Failed to delete conversation: ${errorMessage}`);
+        setHasMore(false);
       }
     } catch (err) {
-      console.error("Error during delete operation:", err);
-      alert("An error occurred while deleting the conversation. Please try again.");
+      console.error('Error loading more messages:', err);
+      showError(`Failed to load more messages: ${err.message}`);
+    } finally {
+      setIsLoadingMore(false);
     }
   };
 
-  // Add click outside handler for menu
-  useEffect(() => {
-    const handleClickOutside = (event) => {
-      if (openMenuId && !event.target.closest('.conversation-menu')) {
-        setOpenMenuId(null);
-      }
-    };
+  if (userLoading) {
+    return (
+      <div className="flex justify-center items-center h-screen">
+        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-indigo-500"></div>
+        <p className="ml-4 text-indigo-700">Loading user profile...</p>
+      </div>
+    );
+  }
 
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutside);
-    };
-  }, [openMenuId]);
-
-  // Add scroll to bottom effect
-  useEffect(() => {
-    if (messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [messages, activeConversation]);
+  if (!userProfile) {
+    return null;
+  }
 
   return (
-    <div className="flex h-screen bg-white">
-      <ConversationSidebar
-        conversations={history.map(conv => ({
-          id: conv.id,
-          name: conv.title
-        }))}
-        activeConversation={activeConversation}
-        onSelectConversation={(conv) => handleConversationSelect(conv.id)}
-        onNewConversation={handleNewConversation}
+    <div className="flex h-screen overflow-hidden">
+      <ConversationSidebar 
+        conversations={history}
+        onSelectConversation={handleConversationSelect}
+        onCreateNewConversation={handleNewConversation}
+        activeConversationId={activeConversation}
         onRenameConversation={handleRename}
         onDeleteConversation={handleDeleteConversation}
+        editingConvId={editingConvId}
+        setEditingConvId={setEditingConvId}
+        editingTitle={editingTitle}
+        setEditingTitle={setEditingTitle}
+        openMenuId={openMenuId}
+        setOpenMenuId={setOpenMenuId}
+        isNewConversation={isNewConversation}
+        setIsNewConversation={setIsNewConversation}
+        userProfile={userProfile}
       />
-      <div className="flex-1 flex flex-col">
-        <ChatHeader
-          currentPersonality={currentPersonality}
-          currentCategory={currentCategory}
-          onPersonalitySelect={handlePersonalitySelect}
-          onCategorySelect={handleCategorySelect}
+      <div className="flex-1 flex flex-col bg-gray-50">
+        <ChatHeader 
+          conversationTitle={activeConversation ? (history.find(c => c.id === activeConversation)?.title || 'New Chat') : 'New Chat'}
+          activeConversationId={activeConversation}
+          onRenameClick={(id, title) => { setEditingConvId(id); setEditingTitle(title); }}
+          onDeleteClick={handleDeleteConversation}
+          isNewConversation={isNewConversation}
         />
-        <OfflineBanner isOffline={isOffline} queueLength={queueLength} error={error} />
-        <ChatMessages
+
+        {isOffline && <OfflineBanner queueLength={queueLength} error={error} />}
+
+        <ChatMessages 
           messages={messages}
-          messageReactions={messageReactions}
-          onReaction={handleMessageReaction}
           messagesEndRef={messagesEndRef}
+          isLoading={isLoading || isLoadingMessages}
+          showDocumentPreview={showDocumentPreview}
+          previewContent={previewContent}
+          previewFilename={previewFilename}
+          setShowDocumentPreview={setShowDocumentPreview}
+          onMessageReaction={handleMessageReaction}
+          messageReactions={messageReactions}
+          loadMoreMessages={loadMoreMessages}
+          hasMore={hasMore}
+          isLoadingMore={isLoadingMore}
+          conversationId={activeConversation}
         />
-        <ChatInput
-          value={newMessage}
+
+        <ChatInput 
+          newMessage={newMessage}
           onChange={setNewMessage}
-          onSend={handleSendMessage}
-          onKeyPress={handleKeyPress}
+          handleSendMessage={handleSendMessage}
           isSending={isSending}
-          onDocumentParsed={setDocText}
+          showPersonalitySelector={showPersonalitySelector}
+          setShowPersonalitySelector={setShowPersonalitySelector}
+          currentPersonality={currentPersonality}
+          handlePersonalitySelect={handlePersonalitySelect}
+          showCategorySelector={showCategorySelector}
+          setShowCategorySelector={setShowCategorySelector}
+          currentCategory={currentCategory}
+          handleCategorySelect={handleCategorySelect}
+          docText={docText}
+          setDocText={setDocText}
+          handleKeyPress={handleKeyPress}
         />
-        {showDocumentPreview && (
-          <DocumentPreview
-            content={previewContent}
-            filename={previewFilename}
-            onClose={() => setShowDocumentPreview(false)}
-          />
-        )}
-        {showPersonalitySelector && (
-          <AIPersonalitySelector
-            currentPersonality={currentPersonality}
-            onSelect={handlePersonalitySelect}
-            onClose={() => setShowPersonalitySelector(false)}
-          />
-        )}
-        {showCategorySelector && (
-          <CategorySelector
-            currentCategory={currentCategory}
-            onSelect={handleCategorySelect}
-            onClose={() => setShowCategorySelector(false)}
-          />
+
+        {!isPremium && (
+          <div className="fixed bottom-4 right-4 z-50">
+            <Button variant="primary" onClick={() => navigate('/pricing')}>
+              Upgrade to Premium
+            </Button>
+          </div>
         )}
       </div>
     </div>
