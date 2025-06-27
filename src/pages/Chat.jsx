@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useContext } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { supabase } from '../utils/supabase';
-import { MoreVertical, Send, Loader2, Trash2, Pencil, WifiOff } from 'lucide-react';
+import { MoreVertical, Send, Loader2, Trash2, Pencil, WifiOff, FileText } from 'lucide-react';
 import { DocumentPreview, MessageReaction, AIPersonalitySelector, CategorySelector } from '../components/ChatComponents';
 import ConversationSidebar from '../components/ConversationSidebar';
 import ChatHeader from '../components/ChatHeader';
@@ -13,6 +13,7 @@ import { useOffline } from '../hooks/useOffline';
 import { saveMessages } from '../utils/offlineUtils';
 import { useNotification } from '../contexts/NotificationContext';
 import { UserContext } from '../contexts/UserContext';
+import DocumentUpload from '../components/DocumentUpload';
 
 const FREE_USER_CONVERSATION_LIMIT = 1;
 const FREE_USER_AI_MESSAGE_LIMIT = 10;
@@ -54,6 +55,10 @@ const Chat = () => {
   const { showSuccess, showError, showInfo } = useNotification();
   const { userProfile, userLoading, isPremium, refreshUserProfile } = useContext(UserContext);
   const { isOffline, queueLength, error, queueMessage, loadMessages: loadMessagesWithOffline } = useOffline(activeConversation);
+
+  const [uploadingDoc, setUploadingDoc] = useState(false);
+  const [uploadedDoc, setUploadedDoc] = useState(null);
+  const [uploadError, setUploadError] = useState(null);
 
   const handleConversationSelect = useCallback(async (conversation) => {
     if (!conversation || !conversation.id) {
@@ -130,41 +135,36 @@ const Chat = () => {
 
   const handleSendMessage = async () => {
     if (newMessage.trim() === '' || isSending || userLoading || !userProfile) return;
-
     const currentUserId = userProfile.id;
-
-    // Free user conversation limit check
     if (!isPremium && history.length >= FREE_USER_CONVERSATION_LIMIT && isNewConversation) {
       showInfo(`As a free user, you are limited to ${FREE_USER_CONVERSATION_LIMIT} conversation. Please upgrade to premium to create more.`);
       return;
     }
-
-    // Free user AI message limit check
     const aiMessagesCount = messages.filter(msg => msg.sender === 'ai').length;
     if (!isPremium && aiMessagesCount >= FREE_USER_AI_MESSAGE_LIMIT) {
       showInfo(`As a free user, you are limited to ${FREE_USER_AI_MESSAGE_LIMIT} AI messages per conversation. Please upgrade to premium.`);
       return;
     }
-
     setIsSending(true);
     let currentConversationId = activeConversation;
     const messageToSend = newMessage;
-    setNewMessage(''); // Clear input field immediately for better UX
-
-    // Optimistic UI update for user message
+    setNewMessage('');
     const tempUserMsgId = gen_random_uuid();
+    // If a document was uploaded, append a document icon and filename to the user's message
+    let userMsgContent = messageToSend;
+    if (uploadedDoc && uploadedDoc.success && uploadedDoc.name) {
+      userMsgContent = `📄 [${uploadedDoc.name}]\n` + userMsgContent;
+    }
     const newUserMsg = {
       id: tempUserMsgId,
-      conversation_id: currentConversationId || 'new', // Use placeholder for new convos
+      conversation_id: currentConversationId || 'new',
       sender: 'user',
-      content: messageToSend,
+      content: userMsgContent,
       content_type: 'text',
       created_at: new Date().toISOString(),
     };
     setMessages(prev => [...prev, newUserMsg]);
-
     try {
-      // 1. Create new conversation if it's a new chat
       if (isNewConversation || !currentConversationId) {
         const title = messageToSend.substring(0, 30) || `Conversation ${history.length + 1}`;
         const { data: newConv, error } = await supabase
@@ -172,49 +172,48 @@ const Chat = () => {
           .insert([{ user_id: currentUserId, title }])
           .select()
           .single();
-
         if (error) {
           throw new Error(`Failed to create new conversation: ${error.message}`);
         }
-
         currentConversationId = newConv.id;
         setActiveConversation(newConv.id);
         setHistory(prev => [newConv, ...prev]);
         setIsNewConversation(false);
         navigate(`/chat/${newConv.id}`, { replace: true });
-        showSuccess('New conversation created!');
-
-        // Update conversation_id for the optimistically added message
         setMessages(prev => prev.map(msg =>
           msg.id === tempUserMsgId ? { ...msg, conversation_id: currentConversationId } : msg
         ));
       }
-
-      // 2. Insert user message into Supabase
-      // The message is already added optimistically, now we just save it
+      // Fetch document context for this conversation
+      let ragContext = '';
+      try {
+        const { data: docChunks, error: docError } = await supabase
+          .from('document_contexts')
+          .select('content')
+          .eq('conversation_id', currentConversationId);
+        if (!docError && docChunks && docChunks.length > 0) {
+          ragContext = docChunks.map(chunk => chunk.content).join('\n---\n');
+        }
+      } catch (e) { /* ignore */ }
+      // Insert user message into Supabase
       const { data: insertedUserMsg, error: insertUserError } = await supabase
         .from('messages')
         .insert([{
           conversation_id: currentConversationId,
-          sender: 'user', // Ensure sender is explicitly 'user'
-          content: messageToSend,
+          sender: 'user',
+          content: userMsgContent,
           content_type: 'text',
           created_at: newUserMsg.created_at,
         }])
         .select()
         .single();
-      
       if (insertUserError) {
         throw new Error(`Failed to save message: ${insertUserError.message}`);
       }
-      
-      // Replace temporary user message with the actual message from DB for consistency
       setMessages(prev => prev.map(msg => (msg.id === tempUserMsgId ? insertedUserMsg : msg)));
-
-      // 3. Call backend for AI response
+      // Call backend for AI response, always include RAG context
       const allMessagesForApi = messages.filter(m => m.id !== tempUserMsgId);
       allMessagesForApi.push(insertedUserMsg);
-
       const res = await fetch('http://localhost:8000/ask', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -222,16 +221,15 @@ const Chat = () => {
           user_id: currentUserId,
           conversation_id: currentConversationId,
           messages: allMessagesForApi.map(msg => ({ sender: msg.sender, content: msg.content })),
+          rag_context: ragContext,
         }),
       });
-
       if (!res.ok) {
         const errorData = await res.json();
         showError(errorData.error || 'Failed to get AI response.');
         setIsSending(false);
         return;
       }
-
       const data = await res.json();
       if (data.answer) {
         setMessages(prev => [...prev, {
@@ -244,12 +242,10 @@ const Chat = () => {
           metadata: data.metadata || {},
           created_at: new Date().toISOString(),
         }]);
-
         await supabase
           .from('conversations')
           .update({ updated_at: new Date().toISOString(), summary: data.summary || null })
           .eq('id', currentConversationId);
-
         setHistory(prevHistory => prevHistory.map(conv => 
           conv.id === currentConversationId ? 
           { ...conv, updated_at: new Date().toISOString(), summary: data.summary || conv.summary || null } : 
@@ -261,12 +257,13 @@ const Chat = () => {
     } catch (err) {
       console.error(err);
       showError(`Error: ${err.message}`);
-      // Mark optimistic message as failed
       setMessages(prev => prev.map(msg => 
         msg.id === tempUserMsgId ? { ...msg, error: true } : msg
       ));
     } finally {
       setIsSending(false);
+      // Clear uploadedDoc after sending a message
+      setUploadedDoc(null);
     }
   };
 
@@ -403,6 +400,86 @@ const Chat = () => {
     }
   };
 
+  const handleDocumentUpload = async (file) => {
+    setUploadingDoc(true);
+    setUploadError(null);
+    setUploadedDoc({ name: file.name });
+    let conversationId = activeConversation;
+    if (!conversationId) {
+      const title = file.name || `Conversation ${history.length + 1}`;
+      const { data: newConv, error } = await supabase
+        .from('conversations')
+        .insert([{ user_id: userProfile.id, title }])
+        .select()
+        .single();
+      if (error) {
+        showError('Failed to create conversation for document upload');
+        setUploadingDoc(false);
+        return;
+      }
+      conversationId = newConv.id;
+      setActiveConversation(newConv.id);
+      setHistory(prev => [newConv, ...prev]);
+      setIsNewConversation(false);
+      navigate(`/chat/${newConv.id}`, { replace: true });
+    }
+    // Now upload the document
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('conversation_id', conversationId);
+    try {
+      const response = await fetch('http://localhost:8000/upload', {
+        method: 'POST',
+        body: formData,
+      });
+      let data;
+      try {
+        data = await response.json();
+      } catch (jsonErr) {
+        setUploadError('Upload failed: Invalid server response.');
+        setUploadedDoc(null);
+        showError('Upload failed: Invalid server response.');
+        return;
+      }
+      if (!response.ok) {
+        // Show backend error if present
+        const errorMsg = data && data.error ? data.error : 'Upload failed.';
+        setUploadError(errorMsg);
+        setUploadedDoc(null);
+        showError(errorMsg);
+        return;
+      }
+      // Success if at least one chunk was stored
+      if ((data.stored && data.stored > 0) || (data.chunks && data.chunks > 0)) {
+        setDocText(data.text);
+        setUploadedDoc({ name: data.filename, success: true });
+        showSuccess(`Document '${data.filename}' uploaded and processed!`);
+        setMessages(prev => [
+          ...prev,
+          {
+            id: `doc-${Date.now()}`,
+            conversation_id: conversationId,
+            sender: 'system',
+            content: `Document "${data.filename}" uploaded and available for questions.`,
+            content_type: 'document',
+            metadata: { filename: data.filename },
+            created_at: new Date().toISOString(),
+          }
+        ]);
+      } else {
+        setUploadError('Upload failed: No document chunks stored.');
+        setUploadedDoc(null);
+        showError('Upload failed: No document chunks stored.');
+      }
+    } catch (err) {
+      setUploadError(err.message);
+      setUploadedDoc(null);
+      showError(err.message);
+    } finally {
+      setUploadingDoc(false);
+    }
+  };
+
   if (userLoading) {
     return (
       <div className="flex justify-center items-center h-screen">
@@ -462,6 +539,34 @@ const Chat = () => {
           isLoadingMore={isLoadingMore}
           conversationId={activeConversation}
         />
+
+        <div className="flex flex-row items-center gap-2 px-4 py-2">
+          <input
+            type="file"
+            onChange={e => {
+              const file = e.target.files[0];
+              if (file) handleDocumentUpload(file);
+              e.target.value = '';
+            }}
+            disabled={isSending || uploadingDoc}
+          />
+          {uploadingDoc && (
+            <div className="flex items-center gap-2 animate-pulse">
+              <Loader2 className="h-5 w-5 text-indigo-500 animate-spin" />
+              <span className="text-gray-700">Uploading...</span>
+            </div>
+          )}
+          {uploadedDoc && (
+            <div className="flex items-center gap-2">
+              <FileText className="h-5 w-5 text-green-600" />
+              <span className="text-gray-800 font-medium">{uploadedDoc.name}</span>
+              {uploadedDoc.success && <span className="text-green-600 ml-1">✓</span>}
+            </div>
+          )}
+          {uploadError && (
+            <div className="text-red-600 text-sm ml-2">{uploadError}</div>
+          )}
+        </div>
 
         <ChatInput 
           newMessage={newMessage}

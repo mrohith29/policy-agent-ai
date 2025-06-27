@@ -2,15 +2,23 @@ import React, { memo, useCallback, useRef } from 'react';
 import { MessageReaction } from './ChatComponents';
 import { VariableSizeList as List } from 'react-window';
 import AutoSizer from 'react-virtualized-auto-sizer';
-import { Loader2, AlertTriangle } from 'lucide-react';
+import { Loader2, AlertTriangle, FileText } from 'lucide-react';
 
 const Message = memo(({ message, messageReactions, onMessageReaction }) => {
   const isUser = message.sender === 'user';
   const isError = message.content_type === 'error' || message.error;
-  const messageContent = message.content;
-
+  let messageContent = message.content;
+  let docFilename = null;
+  // Detect document marker and extract filename
+  if (typeof messageContent === 'string' && messageContent.startsWith('📄 [')) {
+    const match = messageContent.match(/^📄 \[(.+?)\]\n/);
+    if (match) {
+      docFilename = match[1];
+      messageContent = messageContent.replace(/^📄 \[.+?\]\n/, '');
+    }
+  }
   return (
-    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'} mb-4`}>
+    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'} mb-2`}>
       <div
         className={`max-w-[70%] rounded-lg p-3 flex items-start gap-2 ${
           isUser
@@ -19,6 +27,12 @@ const Message = memo(({ message, messageReactions, onMessageReaction }) => {
         } ${isError ? 'bg-red-100 text-red-800 border border-red-300' : ''}`}
       >
         {isError && <AlertTriangle className="h-5 w-5 mt-0.5 text-red-500 flex-shrink-0" />}
+        {docFilename && (
+          <span className="flex items-center gap-1 mr-2 text-indigo-600 font-medium">
+            <FileText className="h-5 w-5" />
+            {docFilename}
+          </span>
+        )}
         <p className="whitespace-pre-wrap break-words">{messageContent}</p>
         {!isUser && !isError && (
           <MessageReaction
@@ -54,12 +68,12 @@ const ChatMessages = ({ messages, messageReactions, onMessageReaction, isLoading
 
   const getItemSize = useCallback((index) => {
     const message = messages[index];
-    if (!message) return 100;
+    if (!message) return 60;
     const contentLen = message.content?.length || 0;
-    // Simple estimation logic
-    const baseHeight = 50; // for padding, etc.
-    const charsPerLine = 40; // Rough estimate
-    const lineHeight = 20;
+    // More compact estimation logic
+    const baseHeight = 32; // for padding, etc.
+    const charsPerLine = 50; // Slightly more per line
+    const lineHeight = 18;
     const numLines = Math.ceil(contentLen / charsPerLine);
     return baseHeight + (numLines * lineHeight);
   }, [messages]);

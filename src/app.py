@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, UUID4, validator
@@ -18,6 +18,9 @@ from slowapi.errors import RateLimitExceeded
 import time
 from datetime import datetime
 import re
+from sentence_transformers import SentenceTransformer
+import numpy as np
+import ast
 
 # Configure logging
 logging.basicConfig(
@@ -58,7 +61,8 @@ async def validate_request(request: Request, call_next):
         # Validate content type for POST/PUT requests
         if request.method in ["POST", "PUT"]:
             content_type = request.headers.get("content-type", "")
-            if not content_type.startswith("application/json"):
+            # Allow multipart/form-data for file uploads
+            if not (content_type.startswith("application/json") or content_type.startswith("multipart/form-data")):
                 raise HTTPException(status_code=400, detail="Invalid content type")
         
         response = await call_next(request)
@@ -72,7 +76,7 @@ async def validate_request(request: Request, call_next):
         logger.error(f"Error processing request: {str(e)}")
         return JSONResponse(
             status_code=500,
-            content={"error": "Internal server error"}
+            content={"error": str(e)}
         )
 
 class MessageIn(BaseModel):
@@ -162,15 +166,36 @@ def update_user_message_count(supabase, user_id):
     logger.info(f"Updating message_count for user_id={user_id}: {count}")
     supabase.table("users").update({"message_count": count}).eq("id", user_id).execute()
 
+# Load embedding model (use a small, fast one for demo; replace with production model as needed)
+EMBEDDING_MODEL = SentenceTransformer('all-MiniLM-L6-v2')
+
+# Helper: chunk text into ~500 token chunks (approx 2000 chars)
+def chunk_text(text, max_length=2000):
+    paragraphs = text.split('\n')
+    chunks = []
+    current = ''
+    for para in paragraphs:
+        if len(current) + len(para) < max_length:
+            current += para + '\n'
+        else:
+            if current:
+                chunks.append(current.strip())
+            current = para + '\n'
+    if current:
+        chunks.append(current.strip())
+    return chunks
+
+# Helper: embed a list of texts
+def embed_texts(texts):
+    return EMBEDDING_MODEL.encode(texts).tolist()
+
 @app.post("/ask")
 @limiter.limit("10/minute")
 async def ask_question(request: Request, query: MessageIn):
     try:
         if not validate_uuid(query.conversation_id):
             raise HTTPException(status_code=400, detail="Invalid conversation ID format")
-
         logger.info(f"Processing question for user {query.user_id} in conversation {query.conversation_id}")
-
         supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
         # 1. Fetch user profile to check membership status and counters
@@ -206,6 +231,53 @@ async def ask_question(request: Request, query: MessageIn):
                     detail=f"As a free user, you are limited to {FREE_USER_AI_MESSAGE_LIMIT} messages. Please upgrade to premium."
                 )
 
+        # RAG: Retrieve relevant document_contexts
+        rag_context = ""
+        # Accept rag_context from frontend if provided
+        try:
+            body = await request.json()
+            if 'rag_context' in body and body['rag_context']:
+                rag_context = body['rag_context']
+        except Exception:
+            pass
+        # If not provided, fallback to DB retrieval
+        if not rag_context:
+            try:
+                doc_chunks = supabase.table("document_contexts").select("content, embedding").eq("conversation_id", str(query.conversation_id)).execute()
+                def safe_parse_embedding(embedding):
+                    if isinstance(embedding, list):
+                        return embedding
+                    if isinstance(embedding, str):
+                        try:
+                            return json.loads(embedding)
+                        except json.JSONDecodeError:
+                            logger.warning(f"Failed to parse embedding string: {embedding}")
+                            return []
+                    return []
+                if doc_chunks.data:
+                    # Embed the user question
+                    question_embedding = embed_texts([query.messages[-1]['content']])[0]
+                    # Compute cosine similarity
+                    def cosine(a, b):
+                        a = np.array(a)
+                        b = np.array(b)
+                        norm_a = np.linalg.norm(a)
+                        norm_b = np.linalg.norm(b)
+                        if norm_a == 0 or norm_b == 0:
+                            return 0.0
+                        return float(np.dot(a, b) / (norm_a * norm_b))
+                    scored = [
+                        (cosine(safe_parse_embedding(chunk["embedding"]), question_embedding), chunk["content"])
+                        for chunk in doc_chunks.data if chunk.get("embedding")
+                    ]
+                    logger.info(f"RAG: scored chunks: {[s[0] for s in scored]}")
+                    scored.sort(reverse=True)
+                    top_chunks = [c for _, c in scored[:3]]
+                    if top_chunks:
+                        rag_context = "\n---\n".join(top_chunks)
+            except Exception as e:
+                logger.warning(f"RAG context retrieval failed: {e}")
+
         # Prepare chat history for the AI model
         user_message_content = query.messages[-1]['content']
         history_for_gemini = []
@@ -215,8 +287,13 @@ async def ask_question(request: Request, query: MessageIn):
             elif msg['sender'] == 'ai':
                 history_for_gemini.append({"role": "model", "parts": [msg["content"]]})
 
+        # Inject RAG context if available
+        prompt = SYSTEM_PROMPT
+        if rag_context:
+            prompt += f"\nRelevant Document Context:\n{rag_context}\n"
+        prompt += "\nUser Query: " + user_message_content
         chat = model.start_chat(history=history_for_gemini)
-        response = chat.send_message(SYSTEM_PROMPT + "\nUser Query: " + user_message_content)
+        response = chat.send_message(prompt)
         ai_answer = response.text.strip()
 
         logger.info(f"Successfully generated AI response for user {query.user_id}")
@@ -244,7 +321,7 @@ async def ask_question(request: Request, query: MessageIn):
         if update_conversation_response.data is None:
             logger.warning(f"Failed to update conversation summary/timestamp: No data returned from Supabase.")
 
-        return serialize_response({"answer": ai_answer})
+        return serialize_response({"answer": ai_answer, "context": rag_context})
 
     except HTTPException as he:
         logger.warning(f"HTTPException in ask_question: {he.detail} (Status: {he.status_code})")
@@ -307,18 +384,60 @@ async def get_messages(conversation_id: str):
         raise HTTPException(status_code=500, detail="An unexpected error occurred while fetching messages.")
 
 @app.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(file: UploadFile = File(...), conversation_id: str = Form(...)):
     try:
         file_ext = os.path.splitext(file.filename)[1].lower()
         temp_path = f"temp_uploaded{file_ext}"
-
         with open(temp_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-
         text = parse_file(temp_path, file_ext)
         os.remove(temp_path)
-
-        return JSONResponse(content={"text": text})
+        # Chunk and embed
+        chunks = chunk_text(text)
+        embeddings = embed_texts(chunks)
+        # --- SMART CHUNK SELECTION ---
+        # Score by length (info density) and remove near-duplicates
+        scored = sorted([(len(c), i, c, e) for i, (c, e) in enumerate(zip(chunks, embeddings)) if len(c.strip()) > 50], reverse=True)
+        selected = []
+        selected_embeds = []
+        max_chunks = 10
+        sim_threshold = 0.85
+        for _, _, chunk, embed in scored:
+            if len(selected) >= max_chunks:
+                break
+            # Remove near-duplicates (cosine similarity)
+            is_duplicate = False
+            for e2 in selected_embeds:
+                sim = float(np.dot(embed, e2) / (np.linalg.norm(embed) * np.linalg.norm(e2)))
+                if sim > sim_threshold:
+                    is_duplicate = True
+                    break
+            if not is_duplicate:
+                selected.append((chunk, embed))
+                selected_embeds.append(embed)
+        # Store in document_contexts if conversation_id is provided
+        inserted = []
+        errors = []
+        if conversation_id:
+            supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+            for chunk, embedding in selected:
+                embedding_for_db = embedding  # Must be a list of floats for pgvector
+                data = {
+                    "conversation_id": conversation_id,
+                    "content": chunk,
+                    "source": file.filename,
+                    "source_id": str(uuid.uuid4()),
+                    "metadata": {"filename": file.filename},
+                    "embedding": embedding_for_db
+                }
+                res = supabase.table("document_contexts").insert(data).execute()
+                if getattr(res, 'status_code', None) in (200, 201) and res.data:
+                    inserted.append(res.data)
+                else:
+                    errors.append(str(res.data))
+        if not inserted:
+            return JSONResponse(status_code=500, content={"error": "Upload failed: No document chunks stored.", "details": errors})
+        return JSONResponse(content={"text": text, "filename": file.filename, "chunks": len(selected), "conversation_id": conversation_id, "stored": len(inserted)})
     except Exception as e:
         logger.error(f"Error uploading file: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
