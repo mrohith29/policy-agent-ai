@@ -40,7 +40,8 @@ const ConversationSidebar = ({
   setOpenMenuId,
   isNewConversation, // Prop from Chat.jsx
   setIsNewConversation, // Prop from Chat.jsx
-  userProfile // New prop for user membership info
+  userProfile,
+  isPremium // <-- new prop
 }) => {
 
   const handleRename = (conversation) => {
@@ -84,8 +85,6 @@ const ConversationSidebar = ({
   const handleConversationClick = (conversation) => {
     onSelectConversation(conversation);
   };
-
-  const isPremiumUser = userProfile?.membership_status === 'premium';
 
   return (
     <div className="w-64 bg-gray-50 border-r border-gray-200 h-full flex flex-col">
@@ -151,13 +150,15 @@ const ConversationSidebar = ({
                   >
                     <Edit2 size={16} />
                   </button>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); handleDelete(conversation); }}
-                    className="p-1 text-gray-500 hover:text-red-600 rounded-md hover:bg-gray-200"
-                    title="Delete Conversation"
-                  >
-                    <Trash2 size={16} />
-                  </button>
+                  {isPremium && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleDelete(conversation); }}
+                      className="p-1 text-gray-500 hover:text-red-600 rounded-md hover:bg-gray-200"
+                      title="Delete Conversation"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  )}
                 </div>
               </div>
             )}
@@ -168,7 +169,7 @@ const ConversationSidebar = ({
       {userProfile && (
         <div className="p-4 border-t border-gray-200 bg-white flex flex-col gap-2 text-sm text-gray-700">
           <div className="flex items-center gap-2">
-            {isPremiumUser ? (
+            {isPremium ? (
               <Crown size={16} className="text-yellow-500" />
             ) : (
               <MessageSquare size={16} className="text-gray-500" />
@@ -176,13 +177,13 @@ const ConversationSidebar = ({
             <span>{userProfile.email}</span>
           </div>
           <div className="font-semibold">
-            {isPremiumUser ? (
+            {isPremium ? (
               <span className="text-green-600">Premium User</span>
             ) : (
               <span className="text-blue-600">Free User</span>
             )}
           </div>
-          {userProfile.premium_end_date && (
+          {!isPremium && userProfile.premium_end_date && (
             <p className="text-xs text-gray-500">Premium ends: {new Date(userProfile.premium_end_date).toLocaleDateString()}</p>
           )}
         </div>

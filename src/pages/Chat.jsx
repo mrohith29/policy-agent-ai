@@ -52,7 +52,7 @@ const Chat = () => {
   const MESSAGES_PER_PAGE = 20;
 
   const { showSuccess, showError, showInfo } = useNotification();
-  const { userProfile, userLoading, isPremium } = useContext(UserContext);
+  const { userProfile, userLoading, isPremium, refreshUserProfile } = useContext(UserContext);
   const { isOffline, queueLength, error, queueMessage, loadMessages: loadMessagesWithOffline } = useOffline(activeConversation);
 
   const handleConversationSelect = useCallback(async (conversation) => {
@@ -424,7 +424,7 @@ const Chat = () => {
         onCreateNewConversation={handleNewConversation}
         activeConversationId={activeConversation}
         onRenameConversation={handleRename}
-        onDeleteConversation={handleDeleteConversation}
+        onDeleteConversation={isPremium ? handleDeleteConversation : undefined}
         editingConvId={editingConvId}
         setEditingConvId={setEditingConvId}
         editingTitle={editingTitle}
@@ -434,6 +434,7 @@ const Chat = () => {
         isNewConversation={isNewConversation}
         setIsNewConversation={setIsNewConversation}
         userProfile={userProfile}
+        isPremium={isPremium}
       />
       <div className="flex-1 flex flex-col bg-gray-50">
         <ChatHeader 

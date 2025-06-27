@@ -126,6 +126,7 @@ You're a helpful assistant specialized in understanding and explaining documents
 Please maintain a humble and friendly tone. If a question is out of scope or unclear, kindly ask for clarification or explain politely why it's difficult to answer.
 """
 
+FREE_USER_CONVERSATION_LIMIT = 1 # Define the limit here as well
 FREE_USER_AI_MESSAGE_LIMIT = 10 # Define the limit here as well
 
 def validate_uuid(uuid_str: str) -> bool:
@@ -139,6 +140,28 @@ def serialize_response(data):
     """Helper function to serialize response data with UUID handling"""
     return json.loads(json.dumps(data, cls=UUIDEncoder))
 
+# Utility functions to keep user counters up to date
+
+def update_user_conversation_count(supabase, user_id):
+    # Use direct SQL for accurate count
+    sql = f"SELECT COUNT(*) AS count FROM conversations WHERE user_id = '{user_id}'"
+    result = supabase.rpc('execute_sql', {'sql': sql}).execute()
+    count = 0
+    if result.data and isinstance(result.data, list) and len(result.data) > 0:
+        count = result.data[0].get('count', 0)
+    logger.info(f"Updating conversation_count for user_id={user_id}: {count}")
+    supabase.table("users").update({"conversation_count": count}).eq("id", user_id).execute()
+
+def update_user_message_count(supabase, user_id):
+    # Use direct SQL for accurate count
+    sql = f"SELECT COUNT(*) AS count FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id = '{user_id}')"
+    result = supabase.rpc('execute_sql', {'sql': sql}).execute()
+    count = 0
+    if result.data and isinstance(result.data, list) and len(result.data) > 0:
+        count = result.data[0].get('count', 0)
+    logger.info(f"Updating message_count for user_id={user_id}: {count}")
+    supabase.table("users").update({"message_count": count}).eq("id", user_id).execute()
+
 @app.post("/ask")
 @limiter.limit("10/minute")
 async def ask_question(request: Request, query: MessageIn):
@@ -150,36 +173,43 @@ async def ask_question(request: Request, query: MessageIn):
 
         supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
-        # 1. Fetch user profile to check membership status
+        # 1. Fetch user profile to check membership status and counters
         try:
-            user_profile_response = supabase.table("users").select("membership_status").eq("id", query.user_id).single().execute()
+            user_profile_response = supabase.table("users").select("membership_status, conversation_count, message_count").eq("id", query.user_id).single().execute()
             logger.info(f"user_profile_response: {user_profile_response}")
             user_membership_status = user_profile_response.data['membership_status']
+            conversation_count = user_profile_response.data.get('conversation_count', 0)
+            message_count = user_profile_response.data.get('message_count', 0)
         except Exception as e:
             logger.error(f"User profile not found or error fetching for user {query.user_id}: {e}")
             raise HTTPException(status_code=404, detail="User profile not found or database error.")
         
         is_premium_user = user_membership_status == 'premium'
 
-        # 2. Count existing AI messages for the conversation
+        # 2. Count existing AI messages for the conversation (for reference, but not used for free user limit anymore)
         ai_messages_count_response = supabase.table("messages").select("id").eq("conversation_id", str(query.conversation_id)).eq("sender", "ai").execute()
         if ai_messages_count_response.data is None:
             logger.error("Error counting AI messages: No data returned from Supabase.")
             raise HTTPException(status_code=500, detail="Failed to count AI messages.")
         current_ai_messages_count = len(ai_messages_count_response.data)
 
-        # 3. Enforce AI message limit for free users
-        if not is_premium_user and current_ai_messages_count >= FREE_USER_AI_MESSAGE_LIMIT:
-            raise HTTPException(
-                status_code=403,
-                detail=f"As a free user, you are limited to {FREE_USER_AI_MESSAGE_LIMIT} AI messages per conversation. Please upgrade to premium."
-            )
+        # 3. Enforce conversation/message limits for free users using counters
+        if not is_premium_user:
+            if conversation_count >= FREE_USER_CONVERSATION_LIMIT:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"As a free user, you are limited to {FREE_USER_CONVERSATION_LIMIT} conversation. Please upgrade to premium."
+                )
+            if message_count >= FREE_USER_AI_MESSAGE_LIMIT:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"As a free user, you are limited to {FREE_USER_AI_MESSAGE_LIMIT} messages. Please upgrade to premium."
+                )
 
         # Prepare chat history for the AI model
-        # Frontend sends all messages, so reconstruct history for model
         user_message_content = query.messages[-1]['content']
         history_for_gemini = []
-        for msg in query.messages[:-1]: # Exclude the current user message, which will be sent separately
+        for msg in query.messages[:-1]:
             if msg['sender'] == 'user':
                 history_for_gemini.append({"role": "user", "parts": [msg["content"]]})
             elif msg['sender'] == 'ai':
@@ -191,14 +221,14 @@ async def ask_question(request: Request, query: MessageIn):
 
         logger.info(f"Successfully generated AI response for user {query.user_id}")
 
-        # 4. Insert only the AI message into the DB (user message is inserted by frontend)
+        # 4. Insert only the AI message into the DB
         ai_message_data = {
             "conversation_id": str(query.conversation_id),
             "sender": "ai",
             "content": ai_answer,
-            "content_type": "text", # Default to text, can be expanded
-            "context": {}, # Placeholder, can be populated with RAG context etc.
-            "metadata": {"model_used": "gemini-1.5-flash", "timestamp": datetime.now().isoformat()} # Example metadata
+            "content_type": "text",
+            "context": {},
+            "metadata": {"model_used": "gemini-1.5-flash", "timestamp": datetime.now().isoformat()}
         }
         insert_ai_response = supabase.table("messages").insert([ai_message_data]).execute()
         if insert_ai_response.data is None:
@@ -206,10 +236,9 @@ async def ask_question(request: Request, query: MessageIn):
             raise HTTPException(status_code=500, detail="Failed to save AI message.")
 
         # 5. Update conversation's updated_at and summary
-        # A more sophisticated summary can be generated by another AI call if needed
         update_conversation_response = supabase.table("conversations").update({
             "updated_at": datetime.now().isoformat(),
-            "summary": ai_answer[:100] + "..." if len(ai_answer) > 100 else ai_answer # Simple summary
+            "summary": ai_answer[:100] + "..." if len(ai_answer) > 100 else ai_answer
         }).eq("id", str(query.conversation_id)).execute()
 
         if update_conversation_response.data is None:
@@ -298,27 +327,31 @@ async def upload_file(file: UploadFile = File(...)):
 async def create_conversation(conv: NewConversation):
     try:
         supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-        # Note: Frontend now handles initial conversation creation directly to DB
-        # This endpoint might be used for other server-side initiated conversations.
-        # Ensure it aligns with the new schema fields.
-        try:
-            response = supabase.table("conversations").insert({
-                "user_id": conv.user_id,
-                "title": conv.title,
-                "created_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat()
-            }).select("id").single().execute() # Select id to return
-            
-            # Access data directly from the response object
-            conversation_data = response['data']
-
-            return serialize_response({"id": conversation_data['id']})
-        except Exception as e:
-            logger.error(f"Error creating conversation: {str(e)}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"Failed to create conversation: {str(e)}")
+        # Fetch user profile for counters
+        user_profile_response = supabase.table("users").select("membership_status, conversation_count").eq("id", conv.user_id).single().execute()
+        user_membership_status = user_profile_response.data['membership_status']
+        conversation_count = user_profile_response.data.get('conversation_count', 0)
+        is_premium_user = user_membership_status == 'premium'
+        # Enforce conversation limit for free users
+        if not is_premium_user and conversation_count >= FREE_USER_CONVERSATION_LIMIT:
+            raise HTTPException(status_code=403, detail=f"As a free user, you are limited to {FREE_USER_CONVERSATION_LIMIT} conversation. Please upgrade to premium.")
+        # Create conversation
+        response = supabase.table("conversations").insert({
+            "user_id": conv.user_id,
+            "title": conv.title,
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat()
+        }).select("id").single().execute()
+        conversation_data = response['data']
+        # Always update counts after creation
+        update_user_conversation_count(supabase, conv.user_id)
+        update_user_message_count(supabase, conv.user_id)
+        return serialize_response({"id": conversation_data['id']})
+    except HTTPException as he:
+        raise he
     except Exception as e:
         logger.error(f"Error creating conversation: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to create conversation: {str(e)}")
 
 @app.put("/conversations/{conversation_id}")
 async def rename_conversation(conversation_id: str, body: RenameConversation):
@@ -338,18 +371,71 @@ async def rename_conversation(conversation_id: str, body: RenameConversation):
 @app.delete("/conversations/{conversation_id}")
 async def delete_conversation(conversation_id: str, request: Request):
     try:
-        # Assuming user_id can be passed in headers for authentication/authorization
-        # For RLS, Supabase handles it if policies are set.
-        # If not using RLS on backend, you'd need a user_id from token/header.
-        # For now, relying on potential RLS for security in Supabase. User_id check removed
-        # from backend as frontend already enforces it for deletion and Supabase RLS is best.
         supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-        
+        # Get user_id before deleting
+        conv = supabase.table("conversations").select("user_id").eq("id", conversation_id).single().execute()
+        user_id = conv.data["user_id"] if conv.data else None
+        # Delete all messages for this conversation first
+        supabase.table("messages").delete().eq("conversation_id", conversation_id).execute()
+        # Now delete the conversation
         supabase.table("conversations").delete().eq("id", conversation_id).execute()
-        
-        return JSONResponse(status_code=200, content={"message": "Conversation deleted successfully"})
+        # Always update counts after deletion
+        if user_id:
+            update_user_conversation_count(supabase, user_id)
+            update_user_message_count(supabase, user_id)
+        return JSONResponse(status_code=200, content={"message": "Conversation and its messages deleted successfully"})
     except Exception as e:
         logger.error(f"Error deleting conversation: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/messages")
+async def create_message(message: dict):
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        # Insert user message
+        insert_result = supabase.table("messages").insert([message]).execute()
+        if insert_result.data is None:
+            raise HTTPException(status_code=500, detail="Failed to save user message.")
+        # Update counts for the user
+        conv = supabase.table("conversations").select("user_id").eq("id", message["conversation_id"]).single().execute()
+        user_id = conv.data["user_id"] if conv.data else None
+        if user_id:
+            update_user_message_count(supabase, user_id)
+            update_user_conversation_count(supabase, user_id)
+        return JSONResponse(status_code=200, content={"message": "User message created successfully"})
+    except Exception as e:
+        logger.error(f"Error creating user message: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/messages/{message_id}")
+async def delete_message(message_id: str):
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        # Get conversation_id and user_id before deleting
+        msg = supabase.table("messages").select("conversation_id").eq("id", message_id).single().execute()
+        conversation_id = msg.data["conversation_id"] if msg.data else None
+        user_id = None
+        if conversation_id:
+            conv = supabase.table("conversations").select("user_id").eq("id", conversation_id).single().execute()
+            user_id = conv.data["user_id"] if conv.data else None
+        supabase.table("messages").delete().eq("id", message_id).execute()
+        if user_id:
+            update_user_message_count(supabase, user_id)
+            update_user_conversation_count(supabase, user_id)
+        return JSONResponse(status_code=200, content={"message": "Message deleted successfully"})
+    except Exception as e:
+        logger.error(f"Error deleting message: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/users/{user_id}/recount")
+async def recount_user_counts(user_id: str):
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        update_user_conversation_count(supabase, user_id)
+        update_user_message_count(supabase, user_id)
+        return JSONResponse(status_code=200, content={"message": "User counts updated"})
+    except Exception as e:
+        logger.error(f"Error recounting user counts: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
