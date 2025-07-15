@@ -26,7 +26,7 @@
 
 ## 👥 Who Can Use This?
 
-* **General Users:** Anyone who regularly agrees to app/website terms and wants to understand what they’re accepting.
+* **General Users:** Anyone who regularly agrees to app/website terms and wants to understand what they're accepting.
 * **Developers:** Those building apps that use legal policies and want to integrate understanding tools.
 * **Businesses:** Enterprises needing an internal tool to help teams quickly interpret legal documents.
 * **Students & Researchers:** Those studying law, policy, or compliance.
@@ -38,8 +38,8 @@
 1. **Clone the Repository**
 
    ```bash
-   git clone https://github.com/your-username/policy-agent-ai.git
-   cd policy-agent-ai
+   git clone https://github.com/your-username/crispterms.git
+   cd crispterms
    ```
 
 2. **Install Dependencies**

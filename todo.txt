@@ -50,3 +50,12 @@ uvicorn src.app:app --reload
 - Add user documentation
 - Add developer documentation
 - Add security documentation
+
+
+docker build -f Dockerfile.backend -t gcr.io/crispterms/backend .
+
+docker push gcr.io/crispterms/backend
+
+   gcloud run deploy crispterms-backend --image gcr.io/crispterms/backend --platform managed --region us-central1 --allow-unauthenticated
+
+gcloud run deploy crispterms-backend --image gcr.io/crispterms/backend --platform managed --region us-central1 --allow-unauthenticated --set-env-vars GEMINI_API_KEY=AIzaSyD94XxXtuF6e1pcYb-94C1BHSWU4733CxE,SUPABASE_URL=https://dwmnlftjfztplaekjtqt.supabase.co,SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImR3bW5sZnRqZnp0cGxhZWtqdHF0Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0NzkyNTY4MywiZXhwIjoyMDYzNTAxNjgzfQ.WFetEjC-XWkSebPVev9UW-3VCSA8QH3DiWeSi14RDZ4,ALLOWED_ORIGINS=https://crispterms-frontend-706640739410.us-central1.run.app,http://localhost:3000 

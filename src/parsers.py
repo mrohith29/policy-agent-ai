@@ -27,16 +27,13 @@ def parse_image(file_path):
     return pytesseract.image_to_string(image)
 
 def parse_file(file_path, ext):
-    try:
-        if ext == ".pdf":
-            return parse_pdf(file_path)
-        elif ext == ".docx":
-            return parse_docx(file_path)
-        elif ext == ".pptx":
-            return parse_pptx(file_path)
-        elif ext in [".jpeg", ".jpg", ".png"]:
-            return parse_image(file_path)
-        else:
-            return "Unsupported file type."
-    except Exception as e:
-        return f"Error parsing file: {str(e)}"
+    if ext == ".pdf":
+        return parse_pdf(file_path)
+    elif ext == ".docx":
+        return parse_docx(file_path)
+    elif ext == ".pptx":
+        return parse_pptx(file_path)
+    elif ext in [".jpeg", ".jpg", ".png"]:
+        return parse_image(file_path)
+    else:
+        raise ValueError(f"Unsupported file type: {ext}")

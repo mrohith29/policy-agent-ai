@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { 
   MessageSquare, 
   Plus, 
@@ -36,10 +36,6 @@ const ConversationSidebar = ({
   setEditingConvId,
   editingTitle,
   setEditingTitle,
-  openMenuId,
-  setOpenMenuId,
-  isNewConversation, // Prop from Chat.jsx
-  setIsNewConversation, // Prop from Chat.jsx
   userProfile,
   isPremium // <-- new prop
 }) => {

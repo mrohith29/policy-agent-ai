@@ -49,7 +49,7 @@ const Message = memo(({ message, messageReactions, onMessageReaction }) => {
 
 Message.displayName = 'Message';
 
-const ChatMessages = ({ messages, messageReactions, onMessageReaction, isLoading, showDocumentPreview, previewContent, previewFilename, setShowDocumentPreview, loadMoreMessages, hasMore, isLoadingMore, conversationId }) => {
+const ChatMessages = ({ messages, messageReactions, onMessageReaction, isLoading, isLoadingMore, conversationId }) => {
   const listRef = useRef();
 
   const Row = useCallback(({ index, style }) => {

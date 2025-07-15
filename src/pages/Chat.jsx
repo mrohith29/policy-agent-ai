@@ -214,7 +214,7 @@ const Chat = () => {
       // Call backend for AI response, always include RAG context
       const allMessagesForApi = messages.filter(m => m.id !== tempUserMsgId);
       allMessagesForApi.push(insertedUserMsg);
-      const res = await fetch('http://localhost:8000/ask', {
+      const res = await fetch('http://localhost:8080/ask', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

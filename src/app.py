@@ -20,7 +20,6 @@ from datetime import datetime
 import re
 from sentence_transformers import SentenceTransformer
 import numpy as np
-import ast
 
 # Configure logging
 logging.basicConfig(
@@ -41,10 +40,9 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS configuration for production
-allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
+    allow_origins="http://localhost:3000",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -390,10 +388,21 @@ async def upload_file(file: UploadFile = File(...), conversation_id: str = Form(
         temp_path = f"temp_uploaded{file_ext}"
         with open(temp_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-        text = parse_file(temp_path, file_ext)
+        try:
+            text = parse_file(temp_path, file_ext)
+        except Exception as e:
+            os.remove(temp_path)
+            logger.error(f"Error parsing file: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"Failed to parse file: {str(e)}")
         os.remove(temp_path)
+        if not text or not isinstance(text, str) or not text.strip():
+            logger.error("Parsed document is empty or invalid.")
+            raise HTTPException(status_code=400, detail="Parsed document is empty or invalid.")
         # Chunk and embed
         chunks = chunk_text(text)
+        if not chunks or all(len(c.strip()) <= 0 for c in chunks):
+            logger.error("No valid chunks produced from document.")
+            raise HTTPException(status_code=400, detail="No valid chunks produced from document.")
         embeddings = embed_texts(chunks)
         # --- SMART CHUNK SELECTION ---
         # Score by length (info density) and remove near-duplicates
@@ -436,8 +445,11 @@ async def upload_file(file: UploadFile = File(...), conversation_id: str = Form(
                 else:
                     errors.append(str(res.data))
         if not inserted:
-            return JSONResponse(status_code=500, content={"error": "Upload failed: No document chunks stored.", "details": errors})
+            logger.error("Upload failed: No document chunks stored.")
+            return JSONResponse(status_code=400, content={"error": "Upload failed: No document chunks stored.", "details": errors})
         return JSONResponse(content={"text": text, "filename": file.filename, "chunks": len(selected), "conversation_id": conversation_id, "stored": len(inserted)})
+    except HTTPException as he:
+        raise he
     except Exception as e:
         logger.error(f"Error uploading file: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -557,6 +569,17 @@ async def recount_user_counts(user_id: str):
         logger.error(f"Error recounting user counts: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for deployment monitoring"""
+    return {
+        "status": "healthy", 
+        "timestamp": datetime.now().isoformat(),
+        "service": "crispterms-backend"
+    }
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import os
+    port = int(os.environ.get("PORT", 8080))
+    uvicorn.run(app, host="0.0.0.0", port=port)
